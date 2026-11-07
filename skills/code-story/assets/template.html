@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="generator" content="code-story">
+<title>{{page_title}}</title>
+<style>{{css}}</style>
+</head>
+<body data-mode="{{mode}}" data-story="{{story_id}}" data-traces="{{traces_json}}" data-syns="{{syn_json}}" data-syn="{{syn_default}}">
+
+<header class="hdr hdr-l glass" aria-label="Change">
+  <button class="ibtn" data-act="side" aria-pressed="true" title="Story map (m)" aria-label="Toggle story map">
+    <svg class="i" viewBox="0 0 16 16"><rect x="2" y="3" width="12" height="10" rx="2"/><path d="M6 3v10"/></svg>
+  </button>
+  <div class="t-title">{{hdr_title}}</div>
+  <div class="refs" title="{{refs_title}}">{{refs}}</div>
+</header>
+
+<header class="hdr hdr-r glass" aria-label="Review tools">
+  <span class="progress" title="Changed frames you've marked reviewed"><svg viewBox="0 0 22 22" aria-hidden="true"><circle class="track" cx="11" cy="11" r="8.5"/><circle class="pbar" cx="11" cy="11" r="8.5"/></svg><span class="p-txt"></span></span>
+  <span class="vsep"></span>
+  <button class="tbtn" data-act="trace-menu" aria-expanded="false" aria-haspopup="true" title="Follow a value through the change">
+    <svg class="i" viewBox="0 0 16 16"><circle cx="3.5" cy="8" r="1.5"/><circle cx="12.5" cy="8" r="1.5"/><path d="M5 8h6"/></svg>
+    <span class="lbl tname">Trace</span>
+  </button>
+  <div class="seg" role="group" aria-label="Diff layout">
+    <button class="tbtn" data-act="view" data-view="unified" aria-pressed="true">Unified</button>
+    <button class="tbtn" data-act="view" data-view="split" aria-pressed="false">Split</button>
+  </div>
+  <button class="ibtn" data-act="notes" aria-pressed="true" title="Review notes (n)" aria-label="Show review notes">
+    <svg class="i" viewBox="0 0 16 16"><path d="M3 2.5h10v8.5l-3 2.5H3z"/><path d="M10 13.5V11h3M5.5 6h5M5.5 8.5h3"/></svg>
+  </button>
+  <button class="tbtn" data-act="files" title="Every changed file (f)">
+    <svg class="i" viewBox="0 0 16 16"><path d="M4 2h5l3 3v9H4z"/><path d="M9 2v3h3M6.5 8.5h3M8 7v3M6.5 11.5h3"/></svg>
+    <span class="lbl">Full diff</span>
+  </button>
+  <button class="ibtn" data-act="help" title="Keyboard shortcuts (?)" aria-label="Keyboard shortcuts">
+    <svg class="i" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6"/><path d="M6.3 6.2a1.8 1.8 0 113 1.4c-.7.4-1.3.8-1.3 1.6M8 11.2v.1"/></svg>
+  </button>
+</header>
+
+<div id="trace-pop" class="pop glass" hidden role="menu">
+  <div class="pop-hint">Lights up every frame a value passes through. Step through them with <kbd>[</kbd>&nbsp;and&nbsp;<kbd>]</kbd>. Names you can trace highlight under the pointer in the code; clicking one starts there.</div>
+</div>
+
+<div id="help" class="sheet" hidden>
+  <div class="sheet-in glass" role="dialog" aria-modal="true" aria-label="Keyboard shortcuts" tabindex="-1">
+    <div class="sheet-h"><button class="traffic" data-act="help-close" title="Close (Esc)" aria-label="Close keyboard shortcuts"><svg viewBox="0 0 12 12" aria-hidden="true"><path d="M4 4l4 4M8 4l-4 4"/></svg></button><h3>Keyboard shortcuts</h3></div>
+    <dl>
+      <dt><kbd>j</kbd> <kbd>k</kbd></dt><dd>Next and previous chapter</dd>
+      <dt class="diff-only"><kbd>r</kbd></dt><dd class="diff-only">Mark the frame in the middle of the screen reviewed</dd>
+      <dt class="diff-only"><kbd>s</kbd></dt><dd class="diff-only">Switch between unified and split</dd>
+      <dt class="diff-only"><kbd>f</kbd></dt><dd class="diff-only">Open the full diff at the current frame</dd>
+      <dt><kbd>[</kbd> <kbd>]</kbd></dt><dd>Step through the current trace</dd>
+      <dt><kbd>n</kbd></dt><dd>Show or hide review notes</dd>
+      <dt><kbd>m</kbd></dt><dd>Collapse or expand the story map; drag its header to move it, double-click the header to put it back</dd>
+      <dt>Click a line</dt><dd>Select it. Shift-click or drag down the line numbers for a range; <kbd>⌘</kbd>/<kbd>ctrl</kbd>-click adds or removes lines. The address bar keeps the link</dd>
+      <dt><kbd>t</kbd></dt><dd>Next code colour theme, <kbd>shift</kbd>+<kbd>t</kbd> the previous one. <select id="syn-pick" aria-label="Code colours"></select></dd>
+      <dt><kbd>esc</kbd></dt><dd>Close whatever is open</dd>
+    </dl>
+  </div>
+</div>
+
+<div class="tracepill glass" role="status">
+  <span>Tracing</span><span class="tp-name"></span><span class="tp-count"></span>
+  <button class="ibtn" data-act="trace-prev" title="Previous frame ([)" aria-label="Previous frame"><svg class="i" viewBox="0 0 16 16"><path d="M10 3.5L5.5 8l4.5 4.5"/></svg></button>
+  <button class="ibtn" data-act="trace-next" title="Next frame (])" aria-label="Next frame"><svg class="i" viewBox="0 0 16 16"><path d="M6 3.5L10.5 8 6 12.5"/></svg></button>
+  <button class="ibtn" data-act="trace-clear" title="Stop tracing (esc)" aria-label="Stop tracing"><svg class="i" viewBox="0 0 16 16"><path d="M4 4l8 8M12 4l-8 8"/></svg></button>
+</div>
+
+<div class="app">
+  <div class="side-slot">
+    <aside class="side glass" id="side" aria-label="Story map">
+      <div class="side-h">
+        <span class="grip" aria-hidden="true" title="Drag to move the map; double-click to put it back"><svg viewBox="0 0 10 16"><circle cx="3" cy="3.5" r="1.2"/><circle cx="7" cy="3.5" r="1.2"/><circle cx="3" cy="8" r="1.2"/><circle cx="7" cy="8" r="1.2"/><circle cx="3" cy="12.5" r="1.2"/><circle cx="7" cy="12.5" r="1.2"/></svg></span>
+        <div class="side-title">{{map_title}}</div>
+        <button class="ibtn" data-act="map-home" title="Put the map back" aria-label="Put the map back" hidden>
+          <svg class="i" viewBox="0 0 16 16"><rect x="2" y="2.5" width="12" height="11" rx="2"/><path d="M6 2.5v11"/></svg>
+        </button>
+        <button class="ibtn" data-act="map-mini" aria-expanded="true" title="Collapse the map (m)" aria-label="Collapse the map">
+          <svg class="i" viewBox="0 0 16 16"><path d="M10 4L6 8l4 4"/></svg>
+        </button>
+      </div>
+      <nav class="side-scroll map" id="map"></nav>
+      <div class="side-f"><span class="bar"><i></i></span><span class="f-txt"></span></div>
+      <div class="mr" data-dir="n"></div><div class="mr" data-dir="s" role="separator" aria-orientation="horizontal" aria-label="Resize the map's height" tabindex="0"></div>
+      <div class="mr" data-dir="w"></div><div class="mr" data-dir="e" role="separator" aria-orientation="vertical" aria-label="Resize the map's width" tabindex="0"></div>
+      <div class="mr" data-dir="nw"></div><div class="mr" data-dir="ne"></div><div class="mr" data-dir="sw"></div><div class="mr" data-dir="se"></div>
+    </aside>
+  </div>
+
+  <main class="content">
+{{hero}}
+{{chapters}}
+  </main>
+</div>
+
+<div class="toast glass" role="status" aria-live="polite"></div>
+{{fulldiff}}
+<script>{{js}}</script>
+</body>
+</html>

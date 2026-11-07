@@ -1,0 +1,5 @@
+interface:
+  display_name: "Code Story"
+  short_description: "Turn a code change, or a tour of a codebase, into a scroll-driven story"
+policy:
+  allow_implicit_invocation: true
