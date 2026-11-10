@@ -13,6 +13,9 @@ It makes two kinds of story:
 
 - A floating map of the chapters that tracks where you are.
 - Unified or split diffs, with word-level highlights on changed lines.
+- Any frame unfolds to show more of its file: 20 lines up or down, everything hidden at that spot, or the whole file.
+- A frame folds to its header with a click, and folds itself when marked reviewed.
+- Click a function, class or constant to open its definition beside the code, when it is defined in a file the page has. In a dbt project, `ref('model')` and macro calls open the model and the macro.
 - Failure paths that open in place at the point they branch off.
 - Trace: click a value and every frame it passes through lights up.
 - A full file-by-file diff, with jumps both ways between it and the story.
@@ -21,9 +24,21 @@ It makes two kinds of story:
 
 ## Install
 
+**Claude Code**, as a plugin, from a terminal:
+
+```bash
+claude plugin install code-story --marketplace eukosh/code-story
+```
+
+The same inside a Claude Code session is `/plugin install code-story --marketplace eukosh/code-story`. On versions before 2.1.275 it takes two steps: `/plugin marketplace add eukosh/code-story`, then `/plugin install code-story@code-story`.
+
+**Any agent that reads Agent Skills** (Claude Code, Codex, Cursor, Gemini CLI and others):
+
 ```bash
 npx skills add eukosh/code-story -g -y -s code-story
 ```
+
+Pick one of the two; installing both gives Claude Code the skill twice.
 
 It needs [`uv`](https://docs.astral.sh/uv/) and `git`. A pull request link also needs [`gh`](https://cli.github.com/).
 
@@ -39,7 +54,8 @@ It indexes the change, reads the code it needs, writes `story.md`, builds the pa
 
 ## Repo layout
 
-- `skills/code-story/` is the skill itself, and the only part an install copies: `SKILL.md`, references, the engine (`scripts/codestory.py`) and the page assets.
+- `skills/code-story/` is the skill itself, and the only part `npx skills` copies: `SKILL.md`, references, the engine (`scripts/codestory.py`) and the page assets.
+- `.claude-plugin/` makes the repo a Claude Code plugin and its own one-plugin marketplace.
 - `docs/design.md` records the design decisions.
 - `tests/` holds the engine's tests: `uv run --with pytest --with pygments --with markdown-it-py --with pyyaml pytest tests -q`
 

@@ -56,6 +56,9 @@
       <dt><kbd>n</kbd></dt><dd>Show or hide review notes</dd>
       <dt><kbd>m</kbd></dt><dd>Collapse or expand the story map; drag its header to move it, double-click the header to put it back</dd>
       <dt>Click a line</dt><dd>Select it. Shift-click or drag down the line numbers for a range; <kbd>⌘</kbd>/<kbd>ctrl</kbd>-click adds or removes lines. The address bar keeps the link</dd>
+      <dt>Click a frame's header</dt><dd>Fold the frame to its header, or open it again. Marking a frame reviewed folds it</dd>
+      <dt>Click an underlined name</dt><dd>Open its definition beside the code: a function, class, constant, dbt model or macro. Names that underline under the pointer have one on this page. Drag the panel by its header; double-click the header to put it back. A click outside the panel, or <kbd>esc</kbd>, closes it. Where the name can also start a trace, <kbd>alt</kbd>-click starts it</dd>
+      <dt>Arrows between lines</dt><dd>Show more of the file: 20 lines up or down, or everything hidden there. Shift-click one for the whole file; the fold button in the frame's header hides them again</dd>
       <dt><kbd>t</kbd></dt><dd>Next code colour theme, <kbd>shift</kbd>+<kbd>t</kbd> the previous one. <select id="syn-pick" aria-label="Code colours"></select></dd>
       <dt><kbd>esc</kbd></dt><dd>Close whatever is open</dd>
     </dl>
@@ -96,8 +99,22 @@
   </main>
 </div>
 
+<aside id="def" class="def glass" hidden aria-label="Definition">
+  <div class="def-h">
+    <button class="traffic" data-act="def-close" title="Close (Esc)" aria-label="Close definition"><svg viewBox="0 0 12 12" aria-hidden="true"><path d="M4 4l4 4M8 4l-4 4"/></svg></button>
+    <span class="path"></span><span class="grow"></span>
+    <span class="def-nav" hidden>
+      <button class="ibtn" data-act="def-prev" title="Previous candidate" aria-label="Previous candidate"><svg class="i" viewBox="0 0 16 16"><path d="M10 3.5L5.5 8l4.5 4.5"/></svg></button>
+      <span class="def-n"></span>
+      <button class="ibtn" data-act="def-next" title="Next candidate" aria-label="Next candidate"><svg class="i" viewBox="0 0 16 16"><path d="M6 3.5L10.5 8 6 12.5"/></svg></button>
+    </span>
+  </div>
+  <div class="def-body"></div>
+</aside>
+
 <div class="toast glass" role="status" aria-live="polite"></div>
 {{fulldiff}}
+{{sources}}
 <script>{{js}}</script>
 </body>
 </html>

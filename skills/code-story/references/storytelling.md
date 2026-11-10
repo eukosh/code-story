@@ -13,7 +13,7 @@ Follow the program, not the file list. Find the first moment the changed behavio
 
 ## Context
 
-The reader is new to this code. Give them what they need one hop out from each change: who calls it, what consumes its result, where a value comes from, what shape the data has. A test fixture is often the clearest statement of a data shape anywhere in the repo. Mark mechanisms that live outside the repo (another service, a module in another repo) with an `external` note instead of guessing at them. When a dependency has a local checkout, read it at the version the repo pins (`git show v2:path`), not at whatever the checkout has open, and name that version in the note.
+The reader is new to this code. Give them what they need one hop out from each change: who calls it, what consumes its result, where a value comes from, what shape the data has. A test fixture is often the clearest statement of a data shape anywhere in the repo. Keep each frame to the lines its point is about: on the page the reader can unfold the rest of the file from any frame, and click a name to open its definition when the page has the file that defines it. Mark mechanisms that live outside the repo (another service, a module in another repo) with an `external` note instead of guessing at them. When a dependency has a local checkout, read it at the version the repo pins (`git show v2:path`), not at whatever the checkout has open, and name that version in the note.
 
 ## Evidence beside claims
 

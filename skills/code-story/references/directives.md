@@ -66,7 +66,7 @@ A line of prose that starts with `@` reads as a directive; write `\@` to start i
 @ctx src/access.py@head 43
 ```
 
-Unchanged code at head or at the merge-base, marked Unchanged. Use it for context one hop out: callers, consumers, the fixture that shows a shape, the code a removed line used to call. Any file in the repo works, changed or not. Read the exact lines with `show path@head:a-b` first (`show` also takes `path@head a-b`, and `@ctx` takes `path@head:a-b`); line numbers from other tools are easy to get one off.
+Unchanged code at head or at the merge-base, marked Unchanged. Use it for context one hop out: callers, consumers, the fixture that shows a shape, the code a removed line used to call. Any file in the repo works, changed or not. A file shown at head also makes its definitions clickable wherever the page uses their names. Read the exact lines with `show path@head:a-b` first (`show` also takes `path@head a-b`, and `@ctx` takes `path@head:a-b`); line numbers from other tools are easy to get one off.
 
 ### `@ripple`
 
@@ -185,6 +185,7 @@ When the build lists gaps, place each hunk in the chapter it belongs to, put fil
 | `the code under these anchors changed` | Re-read with `show`, update the named chapters, build with `--accept`. It applies only to a build that succeeds. |
 | `the working tree changed since index` | Run `index` again. |
 | `list a file's hunks once each, in file order` | Reorder the ids, or split into one `@diff` per hunk. |
-| `id … is taken by the page itself` | Pick another id; `files`, `side`, `map`, `help`, `trace-pop`, `syn-pick`, `not-in-story` and ids starting `fd-` or `br-` belong to the page. |
+| `id … is taken by the page itself` | Pick another id; `files`, `side`, `map`, `help`, `trace-pop`, `syn-pick`, `not-in-story`, `def` and ids starting `fd-` or `br-` belong to the page. |
 | `a tour has no diff` / `a tour has no base` | Use `@ctx path@head a-b` or `@tree`. |
 | `hand-typed code block` (warning) | Replace with a directive, or use `::: sketch`. |
+| `note: definitions: packed … dbt files` | Nothing to fix. The change names more dbt models than the page packs; `ref()` to the ones listed stays plain text. To make one of them clickable anyway, show it with `@ctx path@head`. |

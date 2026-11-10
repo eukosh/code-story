@@ -35,7 +35,6 @@
   --glass-brd: rgba(255, 255, 255, 0.1);
   --glass-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.12), 0 24px 60px -24px rgba(0, 0, 0, 0.9),
     0 2px 8px rgba(0, 0, 0, 0.4);
-  --blur: blur(22px) saturate(175%);
 
   --sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
   --display: -apple-system, BlinkMacSystemFont, "SF Pro Display", system-ui, sans-serif;
@@ -88,9 +87,7 @@ strong { color: var(--text); font-weight: 600; }
 svg.i { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; flex: none; }
 
 .glass {
-  background: var(--glass-bg), rgba(14, 16, 21, 0.62);
-  backdrop-filter: var(--blur);
-  -webkit-backdrop-filter: var(--blur);
+  background: var(--glass-bg), rgba(14, 16, 21, 0.95);
   border: 1px solid var(--glass-brd);
   box-shadow: var(--glass-shadow);
 }
@@ -143,7 +140,7 @@ body.resizing .side { transition: none; }
 .side.sized .side-scroll { flex: 1; }
 .side-f { border-top: 1px solid var(--line); padding: 10px 16px 12px; font-size: 12px; color: var(--text-3); display: flex; align-items: center; gap: 10px; flex: none; }
 .side-f .bar { flex: 1; height: 3px; border-radius: 3px; background: rgba(255, 255, 255, 0.08); overflow: hidden; }
-.side-f .bar i { display: block; height: 100%; width: 0; background: var(--add-fg); border-radius: 3px; transition: width 0.4s var(--ease); }
+.side-f .bar i { display: block; height: 100%; background: var(--add-fg); transform: scaleX(0); transform-origin: 0 50%; transition: transform 0.4s var(--ease); }
 
 /* resize from every edge and corner */
 .mr { position: absolute; z-index: 26; touch-action: none; }
@@ -194,7 +191,7 @@ body.map-mini .map li > button { padding: 4px 0; }
 .map ol { list-style: none; margin: 0; padding: 0; position: relative; }
 .map .rail, .map .fill { position: absolute; left: 9px; width: 1.5px; border-radius: 2px; }
 .map .rail { top: 12px; bottom: 12px; background: rgba(255, 255, 255, 0.08); }
-.map .fill { top: 12px; height: 0; background: linear-gradient(180deg, rgba(185, 226, 255, 0.2), var(--ice)); box-shadow: 0 0 10px var(--ice-glow); transition: height 0.45s var(--ease); }
+.map .fill { top: 12px; bottom: 12px; transform: scaleY(0); transform-origin: 50% 0; background: linear-gradient(180deg, rgba(185, 226, 255, 0.2), var(--ice)); box-shadow: 0 0 10px var(--ice-glow); transition: transform 0.45s var(--ease); }
 .map li { position: relative; }
 .map li > button {
   display: flex;
@@ -219,15 +216,19 @@ body.map-mini .map li > button { padding: 4px 0; }
   border-radius: 50%;
   background: var(--void);
   border: 1.5px solid rgba(255, 255, 255, 0.22);
-  transition: border-color 0.3s, background 0.3s, box-shadow 0.3s;
+  position: relative;
   box-shadow: 0 0 0 calc(var(--heat, 0) * 7px) rgba(185, 226, 255, calc(var(--heat, 0) * 0.28));
 }
+/* the lit dot fades in as an overlay: opacity animates without repainting, and the map changes mid-scroll */
+.map .dot i::after { content: ""; position: absolute; inset: -1.5px; border-radius: 50%; background: var(--ice); box-shadow: 0 0 12px var(--ice-glow); opacity: 0; transition: opacity 0.3s; }
+.map li.active .dot i::after { opacity: 1; }
+.map li.done .dot i::after { background: var(--add-fg); }
 .map .txt { min-width: 0; flex: 1; }
 .map .lbl { display: block; }
 .map .sub { display: block; font-size: 11.5px; color: var(--text-3); margin-top: 2px; opacity: 0.85; }
 .map li.passed .dot i { border-color: rgba(185, 226, 255, 0.6); }
 .map li.active > button { color: var(--text); }
-.map li.active .dot i { border-color: var(--ice); background: var(--ice); box-shadow: 0 0 12px var(--ice-glow); }
+.map li.active .dot i { box-shadow: none; }
 .map li.done .dot i { border-color: var(--add-fg); background: var(--add-fg); }
 .map .cnt { margin-left: auto; color: var(--ice); font: 10.5px var(--mono); visibility: hidden; padding-top: 2px; }
 .map li.hot .cnt { visibility: visible; }
@@ -415,6 +416,10 @@ body[data-mode="tour"] :is(.progress, .vsep, .seg, [data-act="files"], .diff-onl
   flex-wrap: wrap;
   row-gap: 4px;
 }
+.fh:has(> .fh-tog) { padding-left: 6px; gap: 8px; cursor: pointer; }
+.fh .path, .fh .stat { cursor: text; }
+.frame.collapsed > .fh { border-bottom: 0; }
+.frame.collapsed > :not(.fh) { display: none; }
 .fh-r { display: inline-flex; align-items: center; gap: 10px; margin-left: auto; flex: none; }
 .path { font: 12px var(--mono); color: var(--text); flex: none; }
 .path .dir { color: var(--text-3); }
@@ -470,7 +475,8 @@ body[data-mode="tour"] :is(.progress, .vsep, .seg, [data-act="files"], .diff-onl
 }
 .ghjump:hover { opacity: 1; background-color: rgba(255, 255, 255, 0.06); }
 .ln { color: var(--text-3); text-align: right; padding-right: 10px; user-select: none; font-size: 11.5px; cursor: pointer; }
-.row:hover .ln, .half:hover .ln { color: var(--text-2); }
+/* .hov is the script's hover: unlike :hover it skips rows that only scroll under the pointer */
+.row.hov .ln, .half.hov .ln { color: var(--text-2); }
 .sg { color: var(--text-3); user-select: none; text-align: center; }
 .row code, .half code {
   white-space: pre-wrap;
@@ -487,7 +493,7 @@ body[data-mode="tour"] :is(.progress, .vsep, .seg, [data-act="files"], .diff-onl
 .row.d .sg, .half.d .sg { color: var(--del-fg); }
 .row.a mark, .half.a mark { background: var(--add-mk); color: inherit; border-radius: 3px; }
 .row.d mark, .half.d mark { background: var(--del-mk); color: inherit; border-radius: 3px; }
-.row:hover { background-image: linear-gradient(rgba(255, 255, 255, 0.025), rgba(255, 255, 255, 0.025)); }
+.row.hov { background-image: linear-gradient(rgba(255, 255, 255, 0.025), rgba(255, 255, 255, 0.025)); }
 /* evidence links and selection paint on top of the diff tint */
 .row.has-link > span.ln:nth-of-type(2), .srow.has-link > .half:last-child > .ln { box-shadow: inset -2px 0 0 rgba(185, 226, 255, 0.35); }
 .row.linked, .srow.linked, .half.linked { background-image: linear-gradient(var(--link-bg), var(--link-bg)); box-shadow: inset 2px 0 0 var(--ice); }
@@ -498,6 +504,18 @@ body[data-mode="tour"] :is(.progress, .vsep, .seg, [data-act="files"], .diff-onl
 body.pick-L .half[data-side="R"], body.pick-R .half[data-side="L"] { user-select: none; }
 .gap::before, .gap::after { content: ""; height: 1px; background: var(--line); flex: 1; }
 .gap::before { flex: 0 0 20px; }
+.gap[hidden] { display: none; }
+/* a gap that still hides lines: its buttons take the gutter, so the words stay where they were */
+.gap.has-x { padding-left: 22px; background: rgba(185, 226, 255, 0.025); }
+.gap.has-x::before { display: none; }
+.gx { display: inline-flex; gap: 2px; flex: 0 0 86px; }
+.gb { width: 26px; height: 20px; padding: 0; border: 0; border-radius: 6px; background: transparent; color: var(--text-2); cursor: pointer; display: grid; place-items: center; }
+.gb:hover, .gb:focus-visible { color: var(--ice); background: rgba(185, 226, 255, 0.1); }
+.gb svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.gb .dots, .fbtn .dots { stroke-dasharray: 0.1 2.65; }
+/* lines the reader unfolded sit a step back from the ones the story chose */
+main .row.x:not(.a, .d) code, main .half.x:not(.a, .d) code { opacity: 0.74; }
+main .row.x.hov code, main .half.x.hov code { opacity: 1; }
 
 /* split: two equal halves, long lines wrap so both sides stay readable */
 .srow { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
@@ -554,7 +572,7 @@ code .gs { font-weight: 600; color: var(--text); }
 
 .tr { border-radius: 3px; }
 main .tr { cursor: pointer; }
-main .tr:hover { background: var(--ice-soft); box-shadow: inset 0 -1px 0 rgba(185, 226, 255, 0.6); }
+main .hov .tr:hover { background: var(--ice-soft); box-shadow: inset 0 -1px 0 rgba(185, 226, 255, 0.6); }
 .tr.on { background: rgba(185, 226, 255, 0.2); box-shadow: 0 0 0 1px rgba(185, 226, 255, 0.55); }
 .tr.on * { color: #fff !important; }
 .nis-group .tr:hover { background: none; box-shadow: none; cursor: auto; }
@@ -580,7 +598,7 @@ body.tracing .frame.lit.current { box-shadow: 0 0 0 1px rgba(185, 226, 255, 0.6)
 }
 body.tracing .tracepill { opacity: 1; transform: translate(-50%, 0); pointer-events: auto; }
 .tracepill .tp-name { color: var(--ice); font-weight: 500; }
-.tracepill .tp-count { color: var(--text-3); margin-right: 6px; }
+.tracepill .tp-count { color: var(--text-3); margin-right: 6px; font-variant-numeric: tabular-nums; }
 
 /* ---------- notes ---------- */
 
@@ -690,7 +708,7 @@ body.view-split .attach .why .to { display: inline-block; }
 
 /* ---------- full diff ---------- */
 
-.files { position: fixed; inset: 0; z-index: 50; background: rgba(0, 0, 0, 0.55); backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px); }
+.files { position: fixed; inset: 0; z-index: 50; background: rgba(0, 0, 0, 0.7); }
 .files[hidden] { display: none; }
 .files-in {
   position: absolute;
@@ -729,7 +747,8 @@ body.view-split .attach .why .to { display: inline-block; }
 .files-resize { cursor: col-resize; position: relative; }
 .files-resize::after { content: ""; position: absolute; top: 0; bottom: 0; left: 2px; width: 1px; background: var(--line); transition: background 0.2s; }
 .files-resize:hover::after, body.resizing .files-resize::after { background: rgba(185, 226, 255, 0.5); width: 2px; }
-.files-body { overflow-y: auto; padding: 18px 22px 40vh; }
+/* files fill in while the diff is open and the page corrects the scroll itself, so the browser mustn't too */
+.files-body { overflow-y: auto; padding: 18px 22px 40vh; overflow-anchor: none; }
 .fd-file { margin: 0 0 18px; border: 1px solid var(--line); border-radius: var(--r-md); background: var(--ink); overflow: clip; }
 .fd-head { display: flex; gap: 10px; align-items: center; padding: 8px 14px 8px 8px; background: var(--ink-3); border-bottom: 1px solid var(--line); position: sticky; top: -18px; z-index: 2; cursor: pointer; }
 .fd-file.collapsed .fd-head { border-bottom: 0; }
@@ -737,12 +756,18 @@ body.view-split .attach .why .to { display: inline-block; }
 .fd-tog { width: 24px; height: 24px; border-radius: 6px; border: 0; background: transparent; color: var(--text-3); cursor: pointer; display: grid; place-items: center; flex: none; }
 .fd-tog:hover { background: rgba(255, 255, 255, 0.07); color: var(--text); }
 .fd-tog svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; transition: transform 0.2s; }
-.fd-file.collapsed .fd-tog svg { transform: rotate(-90deg); }
+.fd-file.collapsed .fd-tog svg, .frame.collapsed > .fh .fd-tog svg { transform: rotate(-90deg); }
 .fd-head .path, .fd-head .stat { cursor: text; }
+.fd-body > .code { padding: 0 0 6px; }
+.gap.fd-hh { padding: 6px 10px 6px 14px; }
+.gap.fd-hh::before, .gap.fd-hh::after { display: none; }
+.fd-hh .gx { flex: none; }
+.fd-head .fbtn { margin-left: 4px; }
+.file-item summary .fbtn { margin-left: 4px; }
 .fd-hh { display: flex; flex-wrap: wrap; row-gap: 4px; align-items: center; gap: 10px; padding: 6px 10px 6px 14px; background: rgba(185, 226, 255, 0.03); border-top: 1px solid var(--line); color: var(--text-3); font-size: 11.5px; }
-.fd-hunk:first-child .fd-hh { border-top: 0; }
+.fd-body > .fd-hh:first-child, .fd-body > .code:first-child > .fd-hh:first-child { border-top: 0; }
 .fd-hh code { color: var(--text-3); font-size: 11.5px; min-width: 0; overflow-wrap: anywhere; }
-.fd-hh > span:first-child { color: var(--text-2); }
+.fd-hh .wh { color: var(--text-2); }
 .fd-back { height: 24px; padding: 0 9px; border-radius: 7px; border: 1px solid rgba(185, 226, 255, 0.3); background: rgba(185, 226, 255, 0.06); color: var(--ice); font-size: 11.5px; cursor: pointer; flex: none; }
 .fd-back:hover { background: rgba(185, 226, 255, 0.12); }
 body.files-open { overflow: hidden; }
@@ -756,6 +781,22 @@ body.files-open { overflow: hidden; }
 .toast { position: fixed; bottom: 22px; right: 22px; z-index: 70; padding: 8px 14px; border-radius: 10px; font-size: 12.5px; color: var(--text); opacity: 0; transform: translateY(8px); transition: opacity 0.2s, transform 0.2s; pointer-events: none; }
 .toast.show { opacity: 1; transform: none; }
 
+/* ---------- definitions (D43) ---------- */
+
+.hov [data-d]:hover { cursor: pointer; text-decoration: underline; text-decoration-color: rgba(185, 226, 255, 0.75); text-underline-offset: 3px; }
+/* opaque: code is read through nothing */
+.def { background: var(--glass-bg), rgb(14, 16, 21); position: fixed; right: 12px; top: 64px; z-index: 55; width: min(760px, 48vw); max-height: min(560px, max(220px, 46vh)); border-radius: 14px; display: flex; flex-direction: column; overflow: hidden; will-change: transform; }
+.def[hidden] { display: none; }
+.def-h { display: flex; align-items: center; gap: 10px; padding: 9px 12px; border-bottom: 1px solid var(--line); cursor: grab; touch-action: none; user-select: none; }
+.def-h .path { flex: 0 1 auto; min-width: 0; overflow-wrap: anywhere; cursor: text; user-select: text; }
+.def-h .path b { color: var(--text-3); font-weight: 400; }
+.def-nav { display: flex; align-items: center; gap: 2px; color: var(--text-3); font: 11.5px var(--sans); white-space: nowrap; }
+.def-body { overflow: auto; overscroll-behavior: contain; }
+/* one line-number column: the panel shows the file as it is now */
+.def .row { grid-template-columns: 10px 46px 16px minmax(0, 1fr); }
+.def .row > .ln:first-of-type { display: none; }
+.def .gap { padding-left: 14px; }
+
 /* ---------- small screens ---------- */
 
 @media (max-width: 900px) {
@@ -763,6 +804,8 @@ body.files-open { overflow: hidden; }
   .side { left: 0; top: 0; margin: 8px; height: calc(100vh - 16px); max-height: none; width: min(300px, 86vw); z-index: 40; transition: transform 0.3s var(--ease), opacity 0.25s ease; }
   .side-scroll { flex: 1; }
   .side-h { cursor: auto; padding-left: 16px; }
+  .def { left: 8px; right: 8px; top: auto; bottom: 8px; width: auto; max-height: 50vh; }
+  .def-h { cursor: auto; }
   .grip, .mr, .map-slot, [data-act="map-home"] { display: none; }
   body:not(.side-open-m) .side { transform: translateX(calc(-100% - 16px)); opacity: 0; pointer-events: none; }
   .hdr-l { left: 8px; padding-left: 8px; max-width: calc(100vw - 16px); }
