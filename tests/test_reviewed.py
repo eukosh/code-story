@@ -59,3 +59,11 @@ def test_full_diff_file_and_hunk_ids_are_unique(repo):
     ids = [a["id"] for a in repo.tags() if a.get("id", "").startswith("fd-")]
     assert len(ids) == len(set(ids)) == 2 * len(paths)
     assert all(a["data-fd"] in ids for a in repo.tags() if a.get("data-fd"))
+
+
+def test_every_frame_header_carries_its_fold_button(changed):
+    changed.story("@diff app.py#h1 id=one\n@diff app.py#h2 id=two\n@ctx src/context.py@head 2 id=ctx")
+    changed.build()
+    folds = [a for a in changed.tags("button") if a.get("data-act") == "frame-toggle"]
+    assert len(folds) == len(changed.tags("figure", "frame")) == 3
+    assert all(a["aria-expanded"] == "true" for a in folds)

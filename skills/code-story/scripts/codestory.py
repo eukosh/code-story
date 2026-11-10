@@ -17,6 +17,8 @@ Every line of code on the page is read from git. The model writes only story.md.
 from __future__ import annotations
 
 import argparse
+import base64
+import bisect
 import difflib
 import hashlib
 import html
@@ -30,6 +32,7 @@ import subprocess
 import sys
 import tempfile
 import webbrowser
+import zlib
 from urllib.parse import quote
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -145,6 +148,7 @@ class Hunk:
     n: int
     header: str
     rows: list[Row]
+    new_start: int = 0  # from the @@ line: the first new-side line, or the line before a hunk with none
 
     @property
     def id(self) -> str:
@@ -243,7 +247,7 @@ def git_quote(p: str) -> str:
     return '"' + "".join(QUOTE.get(c) or (f"\\{ord(c):03o}" if ord(c) < 0x20 or ord(c) == 0x7F else c) for c in p) + '"'
 
 
-def parse_diff(g: Git, base: str, head: str) -> list[FileDiff]:
+def parse_diff(g: Git, base: str, head: str, marks: bool = True) -> list[FileDiff]:
     names = g.run("diff", *DIFF_ARGS, "--name-status", "-z", base, head).split("\0")
     files: list[FileDiff] = []
     i = 0
@@ -267,7 +271,8 @@ def parse_diff(g: Git, base: str, head: str) -> list[FileDiff]:
             parse_section(f, sec)
     if sections:
         raise Fail(f"diff parse mismatch: patch sections without a file: {', '.join(list(sections)[:3])}")
-    for f in files:
+    # only a build shows them, and pairing lines up is the slow part of reading a diff
+    for f in files if marks else []:
         for h in f.hunks:
             add_word_marks(h)
     return files
@@ -299,7 +304,7 @@ def parse_section(f: FileDiff, sec: str) -> None:
             if not m:
                 continue
             oc, nc = int(m[1]), int(m[2])
-            hunk = Hunk(f.path, len(f.hunks) + 1, m[3].strip(), [])
+            hunk = Hunk(f.path, len(f.hunks) + 1, m[3].strip(), [], nc)
             f.hunks.append(hunk)
         elif hunk is not None and line[:1] in (" ", "-", "+"):
             kind, text = line[0], line[1:]
@@ -340,6 +345,24 @@ def pair_marks(d: Row, a: Row) -> None:
             r.marks = []
 
 
+LONG = 200  # characters; past this a line is compared by word, since comparing by character is quadratic
+PAIR_MAX = 250_000  # words in one line times words in the other; past this a pair goes without word marks
+
+
+def closeness(a: str, b: str, floor: float) -> float:
+    """How alike two lines are, from 0 to 1; 0 unless they beat `floor`."""
+    if len(a) > LONG or len(b) > LONG:
+        a, b = TOKEN_RE.findall(a), TOKEN_RE.findall(b)
+        if len(a) * len(b) > PAIR_MAX:
+            return 0
+    sm = difflib.SequenceMatcher(None, a, b, autojunk=False)
+    # the quick ratios are upper bounds, so most pairs never reach the real one
+    if sm.real_quick_ratio() <= floor or sm.quick_ratio() <= floor:
+        return 0
+    ratio = sm.ratio()
+    return ratio if ratio > floor else 0
+
+
 def add_word_marks(h: Hunk) -> None:
     """Mark changed words only on removed/added lines that pair up closely, to avoid confetti."""
     rows, i = h.rows, 0
@@ -357,8 +380,8 @@ def add_word_marks(h: Hunk) -> None:
         for d in dels:
             best = None
             for q in range(p, len(adds)):
-                ratio = difflib.SequenceMatcher(None, d.text, adds[q].text, autojunk=False).ratio()
-                if ratio > 0.5 and (best is None or ratio > best[0]):
+                ratio = closeness(d.text, adds[q].text, best[0] if best else 0.5)
+                if ratio:
                     best = (ratio, q)
             if best:
                 pair_marks(d, adds[best[1]])
@@ -425,10 +448,26 @@ class Source:
 
     def __init__(self, g: Git) -> None:
         self.g = g
+        self.batch: subprocess.Popen | None = None
 
     @cache
     def text(self, sha: str, path: str) -> str | None:
-        return self.g.try_run("cat-file", "blob", f"{sha}:{path}")
+        # the batch protocol is a line per request, and git drops a carriage return at the end of one
+        if "\n" in path or path.endswith("\r"):
+            return self.g.try_run("cat-file", "blob", f"{sha}:{path}")
+        # one git process answers every read; a story touches dozens of files
+        if self.batch is None:
+            self.batch = subprocess.Popen(
+                ["git", "-C", str(self.g.repo), *GIT_CONFIG, "cat-file", "--batch"],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            )
+        self.batch.stdin.write(f"{sha}:{path}\n".encode())
+        self.batch.stdin.flush()
+        head = self.batch.stdout.readline().split()
+        if len(head) < 3 or head[-1] == b"missing" or not head[-1].isdigit():
+            return None
+        data = self.batch.stdout.read(int(head[-1]) + 1)[:-1]
+        return data.decode("utf-8", errors="replace") if head[-2] == b"blob" else None
 
     @cache
     def raw(self, sha: str, path: str) -> list[str] | None:
@@ -652,7 +691,7 @@ def cmd_index(a: argparse.Namespace) -> None:
             raise Fail(f"base {base_ref!r} is not a commit in {repo}")
         mb = g.run("merge-base", base, head_commit).strip()
 
-        files = parse_diff(g, mb, head)
+        files = parse_diff(g, mb, head, marks=False)
         if not files:
             raise Fail(f"no changes between {base_ref} and {head_ref}")
         generated = generated_by_attr(g, head, [f.path for f in files], worktree)
@@ -786,7 +825,7 @@ class Indexed:
         return next((f for f in self.files if f.path == path), None)
 
 
-def load(dir_: str, verify: bool = True) -> Indexed:
+def load(dir_: str, verify: bool = True, marks: bool = True) -> Indexed:
     d = Path(dir_).expanduser().resolve()
     p = d / "index.json"
     if not p.exists():
@@ -797,7 +836,7 @@ def load(dir_: str, verify: bool = True) -> Indexed:
         raise Fail("the working tree changed since index; run index again so the story shows what's on disk now")
     if idx.get("tour"):
         return Indexed(d, idx, g, [], Source(g))
-    files = parse_diff(g, idx["merge_base"], idx["head"])
+    files = parse_diff(g, idx["merge_base"], idx["head"], marks)
     by_path = {f["path"]: f for f in idx["files"]}
     if set(by_path) != {f.path for f in files}:
         changed = sorted(set(by_path) ^ {f.path for f in files})
@@ -813,7 +852,7 @@ def load(dir_: str, verify: bool = True) -> Indexed:
 
 
 def cmd_show(a: argparse.Namespace) -> None:
-    ix = load(a.dir, verify=False)
+    ix = load(a.dir, verify=False, marks=False)
     hunks = ix.hunks
     specs = list(a.spec)
     while specs:
@@ -1094,7 +1133,7 @@ def syntax_themes_css() -> str:
     return "\n".join(out)
 
 
-PAGE_IDS = {"files", "side", "map", "help", "trace-pop", "syn-pick", "not-in-story"}
+PAGE_IDS = {"files", "side", "map", "help", "trace-pop", "syn-pick", "not-in-story", "def"}
 
 
 def reserved(i: str) -> bool:
@@ -1146,6 +1185,457 @@ def stat_html(adds: int, dels: int) -> str:
     return f'<span class="stat"><span class="s-add">+{adds}</span><span class="s-del">−{dels}</span></span>'
 
 
+FOLD_MAX = 1_500_000  # bytes; a bigger file keeps its frames, but the page can't unfold the rest of it
+
+
+@dataclass
+class Seq:
+    """A file as one run of rows the page can unfold: its diff with every unchanged line in place, or the plain file."""
+
+    i: int  # position in the page's list of sources
+    path: str
+    rows: list[Row] = field(default_factory=list)
+    hunks: list[tuple[int, int, int, int]] = field(default_factory=list)  # first row, rows, old and new line it opens at
+    full: bool = True  # the unchanged lines are in; without them the page can only fill in the hunks
+    sha: str | None = None  # a plain file's commit; a diff reads both sides
+
+    def start(self, h: Hunk) -> int:
+        return self.hunks[h.n - 1][0]
+
+
+def gap(label: str, at: int | None = None, fill: int | None = None) -> str:
+    """A break between shown rows. `at` is the next row's place in the file's Seq, so the page knows what the
+    break hides; `fill` asks the page to put that many rows after it."""
+    attr = ("" if at is None else f' data-at="{at}"') + ("" if fill is None else f' data-len="{fill}"')
+    return f'<div class="gap"{attr}><span>{label}</span></div>'
+
+
+def gap_label(prev: list[Row], nxt: list[Row], skipped: bool = False) -> str:
+    # numbered on the new side, so a removed row next to the gap can't skew it
+    a = max((r.new for r in prev if r.new), default=0) + 1
+    b = min((r.new for r in nxt if r.new), default=a) - 1
+    what = "not shown" if skipped else "unchanged"
+    return f"line {a} {what}" if a == b else f"lines {a}–{b} {what}" if b > a else ""
+
+
+# ---------- definitions (D43) ----------
+
+DEF_ROWS = 120  # rows a definition opens with; the rest of its file unfolds from there
+OUT_ROWS, OUT_FILES, OUT_FILE_ROWS = 3000, 60, 600  # what a page packs of dbt files from outside the change
+CODE = {  # suffix -> the languages whose names can mean each other's definitions
+    **dict.fromkeys((".py", ".pyi"), "py"),
+    **dict.fromkeys((".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts"), "js"),
+    **dict.fromkeys((".c", ".h", ".cc", ".cpp", ".hpp"), "c"),
+    **dict.fromkeys((".kt", ".kts"), "kt"),
+    **dict.fromkeys((".ex", ".exs"), "ex"),
+    **{x: x for x in (".go", ".rs", ".java", ".rb", ".php", ".cs", ".swift", ".scala")},
+}
+DEF_KINDS = {
+    **dict.fromkeys(("def", "function", "func", "fn", "fun", "defp", "defmacro"), "func"),
+    **dict.fromkeys(
+        ("class", "struct", "enum", "trait", "interface", "type", "module", "object", "defmodule", "protocol"), "class"
+    ),
+    **dict.fromkeys(("const", "let", "var", "val"), "const"),
+}
+NAMES = {"n", "nx", "nc", "nf", "no", "na", "nn", "nv"}  # Pygments classes an identifier can carry
+USES = NAMES | {"kt"}  # TypeScript's lexer calls every type after a colon a keyword type
+JS_MODS = {"static", "async", "private", "public", "protected", "readonly", "override", "abstract", "export"}
+COMPOUND = re.compile(r"[A-Za-z0-9]_[A-Za-z0-9]|[a-z0-9][A-Z]")
+CLOSER = re.compile(r"\s*(?:[{)\]}]|end\b)")  # a line that goes on with what is above it
+ABOVE = re.compile(r"\s*(?:@|#|//|/\*|\*|--|\[)")  # decorators, attributes and comments that belong to the line below
+MACRO_RE = re.compile(r"\{%-?\s*macro\s+(\w+)\s*\(")
+ENDMACRO_RE = re.compile(r"\{%-?\s*endmacro")
+REF_RE = re.compile(r"""\bref\(\s*((['"])[\w.-]+\2)\s*(?:,\s*v(?:ersion)?\s*=[^,)]*)?\)""")
+CALL_RE = re.compile(r"(?<![\w.])([A-Za-z_]\w*)\s*\(")
+
+
+@dataclass(frozen=True)
+class Def:
+    path: str
+    line: int  # the line that names it
+    a: int  # what a reader opens: from the decorators and comments above it to the end of its body
+    b: int
+    kind: str = "func"  # func, class, const, model, macro
+    nested: bool = False  # a method, or a function inside another: no other file calls it by its bare name
+    inner: bool = False  # nested in a function, not in a class: nothing reaches it through a dot either
+
+
+def indent(line: str) -> int:
+    t = line.expandtabs(4)
+    return len(t) - len(t.lstrip())
+
+
+def extent(raw: list[str], line: int) -> tuple[int, int]:
+    """A definition's lines, told by indentation: everything deeper than its first line, and closers at its depth."""
+    depth, a, b = indent(raw[line - 1]), line, line
+    for j in range(line, len(raw)):
+        t = raw[j]
+        if not t.strip():
+            continue
+        if indent(t) <= depth and not (indent(t) == depth and CLOSER.match(t)):
+            break
+        b = j + 1
+    while a > 1 and raw[a - 2].strip() and abs(indent(raw[a - 2]) - depth) <= 1 and ABOVE.match(raw[a - 2]):
+        a -= 1
+    return a, b
+
+
+def simple(name: str) -> str:
+    return name.replace("_", "").lower()
+
+
+def closes(sig: list, i: int) -> int:
+    """Where the bracket opened at sig[i] closes."""
+    depth = 0
+    for j in range(i, len(sig)):
+        if sig[j][2] in ("p", "o"):
+            depth += sig[j][3].count("(") - sig[j][3].count(")")
+            if depth <= 0:
+                return j
+    return len(sig)
+
+
+def holds(path: str, module: str) -> bool:
+    """Whether a file is the module an import names. A relative import was resolved to "/dir/file" and has to
+    be that file; any other (src.access, a package, a path alias) only has to end the file's path."""
+    stem = posixpath.splitext(path)[0]
+    if posixpath.basename(stem) in ("__init__", "index"):
+        stem = posixpath.dirname(stem)
+    return "/" + stem == module if module.startswith("/") else ("/" + stem).endswith("/" + module)
+
+
+def imports(sig: list, family: str, path: str) -> tuple[dict[str, tuple[str, str]], dict[int, str], set[int]]:
+    """What a file's import lines say: for each name they bring in, its module and what it is called there;
+    the module of each name written on an import line (by its place in sig); and the places of the aliases."""
+    origin: dict[str, tuple[str, str]] = {}
+    at: dict[int, str] = {}
+    alias: set[int] = set()
+    here = posixpath.dirname(path)
+
+    def beside(rel: str) -> str:
+        there = posixpath.normpath(posixpath.join(here, rel))
+        return "/" + ("" if there == "." else there)
+
+    def bind(names: list[int], module: str) -> None:
+        for k in names:
+            if sig[k - 1][3] == "as":
+                alias.add(k)
+                origin[sig[k][3]] = (module, sig[k - 2][3] if sig[k - 2][2] in NAMES else sig[k][3])
+            else:
+                at[k] = module
+                if not (k + 1 < len(sig) and sig[k + 1][3] == "as"):
+                    origin[sig[k][3]] = (module, sig[k][3])
+
+    i = 0
+    while i < len(sig):
+        n, _, cls, text = sig[i]
+        j, names = i + 1, []
+        if family == "py" and cls == "kn" and text == "from":
+            parts = []
+            while j < len(sig) and sig[j][2] == "nn":
+                parts.append(sig[j][3])
+                j += 1
+            if j < len(sig) and sig[j][3] == "import":
+                wrapped = j + 1 < len(sig) and sig[j + 1][3] == "("
+                j += 1
+                while j < len(sig) and (wrapped or sig[j][0] == n) and (sig[j][2] == "n" or sig[j][3] in ("(", ",", "as")):
+                    names += [j] if sig[j][2] == "n" else []
+                    j += 1
+                dotted = "".join(parts)
+                module = dotted.lstrip(".").replace(".", "/")
+                up = len(dotted) - len(dotted.lstrip("."))
+                bind(names, beside("../" * (up - 1) + module) if up else module)
+        elif family == "js" and cls.startswith("k") and text in ("import", "export"):
+            while j < len(sig) and (sig[j][2] in NAMES or sig[j][3] in ("{", "}", ",", "*", "as", "type")):
+                names += [j] if sig[j][2] in NAMES else []
+                j += 1
+            if j + 1 < len(sig) and sig[j][3] == "from" and sig[j + 1][2].startswith("s"):
+                module = re.sub(r"\.[cm]?[jt]sx?$", "", sig[j + 1][3].strip("'\"`"))
+                bind(names, beside(module) if module.startswith(".") else re.sub(r"^[@~]/", "", module))
+        i = j
+    return origin, at, alias
+
+
+class Dbt:
+    """ref() and macro calls in dbt projects. Read as text: Jinja means nothing to the SQL lexer."""
+
+    def __init__(self, src: Source, g: Git, head: str, confs: list[str]) -> None:
+        # confs: the dbt_project.yml of each project the page has files of
+        self.src, self.head = src, head
+        self.projects: list[tuple[str, dict[str, str | None], dict[str, Def | None]]] = []
+        self.rows = cache(lambda path: len(src.raw(head, path) or []))
+        self.uses = cache(self._uses)
+        files = [f for f in g.run("ls-tree", "-r", "--name-only", "-z", head).split("\0") if f.endswith(".sql")]
+        for conf in confs:
+            root = posixpath.dirname(conf)
+            try:
+                project = yaml.safe_load(src.text(head, conf) or "")
+            except yaml.YAMLError:
+                project = None
+            project = project if isinstance(project, dict) else {}
+
+            def under(key: str, default: str) -> list[str]:
+                dirs = project.get(key) if isinstance(project.get(key), list) else [default]
+                found = (posixpath.normpath(posixpath.join(root, str(d))) for d in dirs)
+                return ["" if d == "." else d + "/" for d in found]
+
+            model_dirs, macro_dirs = under("model-paths", "models"), under("macro-paths", "macros")
+            deepest = lambda dirs, path: max((len(d) for d in dirs if path.startswith(d)), default=-1)
+            models: dict[str, str | None] = {}
+            macros: dict[str, Def | None] = {}
+            for path in files:
+                as_model, as_macro = deepest(model_dirs, path), deepest(macro_dirs, path)
+                if as_macro > as_model:
+                    text = src.text(head, path) or ""
+                    for m in MACRO_RE.finditer(text):
+                        line = text.count("\n", 0, m.start()) + 1
+                        end = ENDMACRO_RE.search(text, m.end())
+                        last = text.count("\n", 0, end.start()) + 1 if end else line
+                        macros[m[1]] = None if m[1] in macros else Def(path, line, line, last, "macro")
+                elif as_model >= 0:
+                    stem = posixpath.basename(path)[:-4]
+                    models[stem] = None if stem in models else path  # two models of one name: neither is linked
+            self.projects.append((root + "/" if root else "", models, macros))
+        self.projects.sort(key=lambda x: -len(x[0]))
+
+    def _uses(self, path: str) -> dict[int, list[tuple[int, int, Def]]]:
+        """Line -> (start, end, definition) for each ref() and project macro call in a file."""
+        out: dict[int, list[tuple[int, int, Def]]] = {}
+        project = next((x for x in self.projects if path.startswith(x[0])), None)
+        if not project:
+            return out
+        _, models, macros = project
+        inside = False  # whether the line starts within {{ }} or {% %}
+        for n, text in enumerate(self.src.raw(self.head, path) or [], 1):
+            hits = []
+            for m in REF_RE.finditer(text):
+                if (target := models.get(m[1][1:-1])) and self.rows(target):
+                    hits.append((m.start(1), m.end(1), Def(target, 1, 1, self.rows(target), "model")))
+            for m in CALL_RE.finditer(text) if macros else ():
+                d, at = macros.get(m[1]), m.start(1)
+                opened = max(text.rfind("{{", 0, at), text.rfind("{%", 0, at))
+                closed = max(text.rfind("}}", 0, at), text.rfind("%}", 0, at))
+                # a macro runs only inside Jinja; outside it the same name is a SQL function
+                if d and (opened > closed or (opened == closed and inside)) and (d.path, d.line) != (path, n):
+                    hits.append((at, m.end(1), d))
+            opened = max(text.rfind("{{"), text.rfind("{%"))
+            closed = max(text.rfind("}}"), text.rfind("%}"))
+            if opened != closed:
+                inside = opened > closed
+            if hits:
+                out[n] = sorted(hits, key=lambda h: h[0])
+        return out
+
+
+class Defs:
+    """Where names are defined, and which of their uses on the page lead there. It reads the highlighter's
+    tokens with a few rules per language and follows no imports or types, so a use is linked only when its
+    name and the code around it settle where it leads."""
+
+    def __init__(self, src: Source, g: Git, head: str, shown: dict[str, set[int]]) -> None:
+        # shown: every file the page packs at head -> its lines that are on the page from the start
+        self.src, self.head = src, head
+        self.open = set(shown)
+        self.outside: list[str] = []  # dbt files packed from outside the change
+        self.note = ""
+        self.names: dict[tuple[str, str], list[Def]] = {}
+        self.sites: set[tuple[str, int, int]] = set()
+        self.sigs: dict[str, list[tuple[int, int, str, str]]] = {}
+        self.imports: dict[str, tuple[dict[str, tuple[str, str]], dict[int, str], set[int]]] = {}
+        self.file_links = cache(self._file_links)
+        self.test = cache(lambda path: any(glob_match(path, p) for p in DEFAULT_EXCLUDES["tests"]))
+        for path in shown:
+            if family := CODE.get(posixpath.splitext(path)[1].lower()):
+                self.scan(path, family)
+        confs = set()
+        for folder in {posixpath.dirname(p) for p in shown if p.endswith(".sql")}:
+            while True:
+                conf = posixpath.join(folder, "dbt_project.yml")
+                if src.text(head, conf) is not None:
+                    confs.add(conf)
+                if not folder:
+                    break
+                folder = posixpath.dirname(folder)
+        self.dbt = Dbt(src, g, head, sorted(confs)) if confs else None
+        if self.dbt:
+            self.admit(shown)
+
+    # ---- code ----
+
+    def scan(self, path: str, family: str) -> None:
+        raw = self.src.raw(self.head, path) or []
+        sig = self.sigs[path] = []
+        for n, toks in enumerate(self.src.lines(self.head, path) or [], 1):
+            col = 0
+            for cls, text in toks:
+                if text.strip() and not cls.startswith("c"):
+                    sig.append((n, col, cls, text))
+                col += len(text)
+        self.imports[path] = imports(sig, family, path)
+        first: dict[int, int] = {}
+        nest: dict[int, int] = {}  # line -> brackets open where it starts
+        depth = 0
+        for i, t in enumerate(sig):
+            if t[0] not in first:
+                first[t[0]], nest[t[0]] = i, depth
+            if t[2] in ("p", "o"):
+                depth += sum(map(t[3].count, "([{")) - sum(map(t[3].count, ")]}"))
+        found: dict[int, tuple[str, bool]] = {}  # place in sig -> kind, method
+        for i, (n, col, cls, text) in enumerate(sig):
+            kind = DEF_KINDS.get(text) if cls.startswith("k") else None
+            if kind:
+                j, method = i + 1, False
+                if text == "func" and j < len(sig) and sig[j][3] == "(":  # Go: func (s *Server) Handle(
+                    j, method = closes(sig, j) + 1, True
+                while j + 2 < len(sig) and sig[j + 1][3] == "." and sig[j + 2][2] in NAMES:  # def self.make, fun String.ext
+                    j += 2
+                if j >= len(sig) or sig[j][2] not in NAMES or sig[j][0] != n:
+                    continue
+                if method and not (j + 1 < len(sig) and sig[j + 1][3].startswith("(")):
+                    continue
+                top = sig[first[n]][1] == 0 and all(t[2].startswith("k") for t in sig[first[n] : i])
+                # C writes `struct foo` at every use; only the one with a body defines it
+                named = family != "c" or kind != "class" or (j + 1 < len(sig) and sig[j + 1][3] == "{")
+                if named and (kind != "const" or top):
+                    found.setdefault(j, (kind, method))
+            elif cls == "nf" and family in (".java", "c"):
+                found.setdefault(i, ("func", False))
+        starts = [*first.values(), len(sig)]
+        for k, i in enumerate(starts[:-1]):
+            line = sig[i : starts[k + 1]]
+            # at the margin and in no open bracket, where a keyword argument can sit too
+            if family == "py" and sig[i][1] == 0 and sig[i][2] == "n" and len(line) > 1 and nest[sig[i][0]] <= 0:
+                if line[1][3] == "=" or (line[1][3] == ":" and any(t[3] == "=" for t in line)):
+                    found.setdefault(i, ("const", False))
+            if family == "js" and sig[i][1] > 0:  # a method: name(args) {
+                m = 0
+                while m < len(line) and line[m][3] in JS_MODS:
+                    m += 1
+                if m + 1 < len(line) and line[m][2] in NAMES and line[m + 1][3] == "(":
+                    rest = line[closes(line, m + 1) + 1 :]
+                    if rest and rest[-1][3] == "{" and not any(t[3] in ("(", ")", "=>") for t in rest):
+                        found.setdefault(i + m, ("func", True))
+        seen = set()
+        around: list[tuple[int, int, str]] = []  # the definitions this one sits in: depth, last line, kind
+        for i, (kind, method) in sorted(found.items()):
+            n, col, _, name = sig[i]
+            self.sites.add((path, n, col))
+            if kind == "const" and name in seen:  # assigned again: the first is the definition
+                continue
+            seen.add(name)
+            a, b = extent(raw, n)
+            depth = indent(raw[n - 1])
+            while around and (around[-1][0] >= depth or around[-1][1] < n):
+                around.pop()
+            home = around[-1][2] if around else "class"
+            around.append((depth, b, kind))
+            self.names.setdefault((family, name), []).append(
+                Def(path, n, a, b, kind, method or depth > 0, depth > 0 and not method and home != "class")
+            )
+
+    def code_links(self, path: str, family: str) -> dict[int, list]:
+        out: dict[int, list] = {}
+        sig = self.sigs[path]
+        origin, imported, alias = self.imports[path]
+        for i, (n, col, cls, name) in enumerate(sig):
+            if cls == "nd" and name.startswith("@"):  # a decorator's token takes its @ along
+                col, name, cls = col + 1, name[1:], "n"
+            if cls not in USES or len(name) < 3 or i in alias or (path, n, col) in self.sites:
+                continue
+            local = self.names.get((family, name), ())
+            if not local and name not in origin:
+                continue
+            after = sig[i + 1][3] if i + 1 < len(sig) else ""
+            if after == "=":  # a name being assigned or passed by keyword, not this definition's use
+                continue
+            dot = i > 0 and sig[i - 1][3] in (".", "::", "->", "?.")
+            owner = simple(sig[i - 2][3]) if dot and i > 1 else ""
+            call = after.startswith("(")
+            # an import settles it: the name is what that module defines under the name it has there, or
+            # nothing on this page
+            module, found = None, local
+            if i in imported:
+                module = imported[i]
+            elif not dot and name in origin and not any(d.path == path for d in local):
+                module, real = origin[name]
+                found = self.names.get((family, real), ())
+
+            def leads(d: Def) -> bool:
+                same = d.path == path
+                if self.test(d.path) and not self.test(path):
+                    return False
+                if same and d.kind != "class" and d.a <= n <= d.b:
+                    return False  # written inside itself: super().load(), or a wrapper calling what it wraps
+                if module is not None:
+                    return not d.nested and holds(d.path, module)
+                telling = COMPOUND.search(name) or name.isupper() or (d.kind == "class" and name[0].isupper())
+                if not dot:
+                    return bool(telling or call) and (same or not d.nested)
+                stem = simple(posixpath.basename(d.path).split(".")[0])
+                named = owner in (stem, simple(posixpath.basename(posixpath.dirname(d.path))))
+                if d.inner:
+                    return False
+                if not d.nested and d.kind != "class":
+                    return named  # a module's own name, reached through a dot: the receiver has to be that module
+                # x.get( says nothing by itself: the receiver has to name the file, or be the object itself
+                return bool(telling or call) and (bool(telling) or named or (same and owner in ("self", "this", "cls", "super")))
+
+            ds = [d for d in found if leads(d)]
+            own = [d for d in ds if d.path == path]
+            ds = own if len(own) == 1 else ds
+            if 1 <= len(ds) <= 3:
+                out.setdefault(n, []).append((col, col + len(name), tuple(ds)))
+        return out
+
+    # ---- dbt ----
+
+    def admit(self, shown: dict[str, set[int]]) -> None:
+        """Pick the dbt files from outside the change that the page packs, so the most-used ones fit the budget."""
+        tally: dict[str, list[int]] = {}  # file -> its uses on the page at load, its uses a reader has to unfold
+        for path in shown:
+            if path.endswith(".sql"):
+                for n, hits in self.dbt.uses(path).items():
+                    for _, _, d in hits:
+                        if d.path not in shown:
+                            tally.setdefault(d.path, [0, 0])[n not in shown[path]] += 1
+        rows = self.dbt.rows
+        order = sorted(tally, key=lambda p: (not tally[p][0], -(tally[p][0] or tally[p][1]), rows(p), p))
+        packed, total, left = [], 0, []
+        for p in order:
+            fits = len(packed) < OUT_FILES and rows(p) <= OUT_FILE_ROWS and total + rows(p) <= OUT_ROWS
+            if fits and len((self.src.text(self.head, p) or "").encode()) <= FOLD_MAX:
+                packed.append(p)
+                total += rows(p)
+            else:
+                left.append(p)
+        self.open.update(packed)
+        self.outside = packed
+        if left:
+            names = ", ".join(posixpath.basename(p)[:-4] for p in left[:8]) + (", …" if len(left) > 8 else "")
+            self.note = (
+                f"definitions: packed {len(packed)} dbt files from outside the change ({total} rows); {len(left)} more "
+                f"are past the page's budget, so ref() and macro calls to them open nothing: {names}"
+            )
+
+    # ---- links ----
+
+    def _file_links(self, path: str) -> dict[int, list]:
+        if path not in self.open:
+            return {}
+        if path in self.sigs:
+            return self.code_links(path, CODE[posixpath.splitext(path)[1].lower()])
+        out: dict[int, list] = {}
+        if self.dbt and path.endswith(".sql"):
+            for n, hits in self.dbt.uses(path).items():
+                if here := [(a, b, (d,)) for a, b, d in hits if d.path in self.open]:
+                    out[n] = here
+        return out
+
+    def links(self, path: str, n: int) -> list[tuple[int, int, tuple[Def, ...]]]:
+        """(start, end, definitions) for the names on one line that lead somewhere the page can open."""
+        return self.file_links(path).get(n, [])
+
+
 @dataclass
 class Frame:
     id: str
@@ -1154,9 +1644,14 @@ class Frame:
 
 
 class Renderer:
-    def __init__(self, ix: Indexed, front: dict) -> None:
+    def __init__(self, ix: Indexed, front: dict, link: bool = False) -> None:
         self.ix = ix
         self.idx = ix.idx
+        self.link = link  # find definitions and link their uses; only a build that writes the page needs it
+        self.defs: Defs | None = None
+        self.def_ids: dict[Def, int] = {}
+        self.wholes: dict[str, bool] = {}
+        self.notes: list[str] = []
         self.tour = bool(ix.idx.get("tour"))
         self.front = front
         self.errors: list[str] = []
@@ -1184,6 +1679,8 @@ class Renderer:
         self.md = MarkdownIt("commonmark", {"html": True, "typographer": False}).enable("table")
         self.traces = self.load_traces()
         self.trace_hits: set[str] = set()
+        self.counting = True  # off while packing sources: a trace has to show up in the story itself
+        self.seqs: dict[str, Seq] = {}
         self.apply_exclusions()
         owner, name = self.idx["owner"], self.idx["name"]
         self.gh = f"https://github.com/{owner}/{name}" if owner else None
@@ -1247,20 +1744,29 @@ class Renderer:
 
     def trace_ranges(self, text: str) -> list[tuple[int, int, str]]:
         out = [(m.start(), m.end(), g) for g, rx in self.traces for m in rx.finditer(text)]
-        self.trace_hits.update(g for _, _, g in out)
+        if self.counting:
+            self.trace_hits.update(g for _, _, g in out)
         return out
 
-    def render_code(self, toks, marks, traces) -> str:
+    def render_code(self, toks, marks, traces, links=()) -> str:
+        if not marks and not traces and not links:
+            return "".join(f'<span class="{cls}">{esc(val)}</span>' if cls else esc(val) for cls, val in toks)
         bounds = {s for s, _ in marks} | {e for _, e in marks}
         bounds |= {s for s, _, _ in traces} | {e for _, e, _ in traces}
+        bounds |= {s for s, _, _ in links} | {e for _, e, _ in links}
+        bounds = sorted(bounds)
+        links = sorted(links)
+        starts = [a for a, _, _ in links]
         out, pos = [], 0
         for cls, val in toks:
             end = pos + len(val)
-            cuts = sorted(b for b in bounds if pos < b < end) + [end]
+            cuts = bounds[bisect.bisect_right(bounds, pos) : bisect.bisect_left(bounds, end)] + [end]
             last = pos
             for c in cuts:
                 piece = esc(val[last - pos : c - pos])
-                span = f'<span class="{cls}">{piece}</span>' if cls else piece
+                k = bisect.bisect_right(starts, last) - 1
+                d = f' data-d="{links[k][2]}"' if k >= 0 and c <= links[k][1] else ""
+                span = f'<span class="{cls}"{d}>{piece}</span>' if cls else f"<span{d}>{piece}</span>" if d else piece
                 g = next((g for a, b, g in traces if a <= last and c <= b), None)
                 if g:
                     span = f'<span class="tr" data-tr="{g}">{span}</span>'
@@ -1283,22 +1789,153 @@ class Renderer:
                 return toks
         return [("", text)]
 
+    def code(self, toks, text: str, marks=(), nonl: bool = False, links=()) -> str:
+        """A line's <code> element: what a row shows now, and what the page unfolds later."""
+        body = pin_indent(self.render_code(toks, marks, self.trace_ranges(text), links)) or " "
+        badge = '<span class="nonl" title="No newline at end of file">no newline</span>' if nonl else ""
+        return f"{code_open(text)}{body}{badge}</code>"
+
+    def def_links(self, sha: str, path: str, n: int | None) -> list[tuple[int, int, str]]:
+        """The names on a head line that lead to a definition, each with the ids the page opens."""
+        if not self.defs or not n or sha != self.idx["head"]:
+            return []
+        ids = lambda ds: " ".join(str(self.def_ids.setdefault(d, len(self.def_ids))) for d in ds)
+        return [(a, b, ids(ds)) for a, b, ds in self.defs.links(path, n)]
+
+    def row_code(self, path: str, r: Row) -> str:
+        links = () if r.kind == "-" else self.def_links(self.idx["head"], path, r.new)
+        return self.code(self.row_tokens(path, r), r.text, r.marks, r.nonl, links)
+
+    def line_code(self, sha: str, path: str, n: int) -> str:
+        text = self.ix.src.raw(sha, path)[n - 1].removesuffix("\r")
+        toks = self.ix.src.lines(sha, path)[n - 1]
+        return self.code(toks if "".join(t for _, t in toks) == text else [("", text)], text, links=self.def_links(sha, path, n))
+
     def row_html(self, path: str, r: Row) -> str:
-        code = pin_indent(self.render_code(self.row_tokens(path, r), r.marks, self.trace_ranges(r.text))) or " "
-        nonl = '<span class="nonl" title="No newline at end of file">no newline</span>' if r.nonl else ""
         return (
             f'<div class="row {KIND[r.kind]}" data-o="{r.old or ""}" data-n="{r.new or ""}">'
             f'<span class="ln">{r.old or ""}</span><span class="ln">{r.new or ""}</span>'
-            f'<span class="sg">{SIGN[r.kind]}</span>{code_open(r.text)}{code}{nonl}</code></div>'
+            f'<span class="sg">{SIGN[r.kind]}</span>{self.row_code(path, r)}</div>'
         )
 
+    # ---- sources: each file once, for the page to unfold or fill in ----
+
+    def whole(self, f: FileDiff) -> bool:
+        """Whether the page can show the file's unchanged lines around its diff."""
+        if f.path in self.wholes:
+            return self.wholes[f.path]
+        src, head = self.ix.src, self.idx["head"]
+        raw = [] if f.status == "D" else src.raw(head, f.path)
+        self.wholes[f.path] = (
+            raw is not None
+            and not (f.symlink or f.submodule or f.status == "T")
+            and len((src.text(head, f.path) or "").encode()) <= FOLD_MAX
+            # the patch and the blob must agree line for line, or unfolded rows would be numbered wrong
+            and all(r.new is None or (r.new <= len(raw) and raw[r.new - 1] == r.text) for h in f.hunks for r in h.rows)
+        )
+        return self.wholes[f.path]
+
+    def diff_seq(self, f: FileDiff) -> Seq:
+        if seq := self.seqs.get("d:" + f.path):
+            return seq
+        raw = [] if f.status == "D" else self.ix.src.raw(self.idx["head"], f.path)
+        full = self.whole(f)
+        seq = self.seqs["d:" + f.path] = Seq(len(self.seqs), f.path, full=full)
+        n = delta = 0  # head lines placed so far; how far new line numbers run ahead of old ones
+        same = lambda a, b: [Row(" ", raw[i], i + 1 - delta, i + 1) for i in range(a, b)] if full else []
+        for h in f.hunks:
+            news = sum(r.kind != "-" for r in h.rows)
+            before = h.new_start - 1 if news else h.new_start
+            seq.rows += same(n, before)
+            seq.hunks.append((len(seq.rows), len(h.rows), before + 1 - delta, before + 1))
+            seq.rows += h.rows
+            n, delta = before + news, delta + h.adds - h.dels
+        seq.rows += same(n, len(raw or []))
+        return seq
+
+    def plain_seq(self, sha: str, path: str) -> Seq | None:
+        key = f"p:{sha}:{path}"
+        if key not in self.seqs:
+            if len(self.ix.src.text(sha, path).encode()) > FOLD_MAX:
+                return None
+            rows = [Row(" ", t, None, n) for n, t in enumerate(self.ix.src.raw(sha, path), 1)]
+            self.seqs[key] = Seq(len(self.seqs), path, rows, sha=sha)
+        return self.seqs[key]
+
     @staticmethod
-    def gap_html(prev: list[Row], nxt: list[Row]) -> str:
-        # numbered on the new side, so a removed row next to the gap can't skew it
-        a = max((r.new for r in prev if r.new), default=0) + 1
-        b = min((r.new for r in nxt if r.new), default=a) - 1
-        label = f"line {a} unchanged" if a == b else f"lines {a}–{b} unchanged" if b > a else ""
-        return f'<div class="gap"><span>{label}</span></div>'
+    def src_attr(seq: Seq | None, at: int) -> str:
+        return f' data-src="{seq.i}" data-at="{at}"' if seq and seq.full else ""
+
+    def sources(self) -> str:
+        """Every Seq, deflated. The page inflates one when a reader unfolds a file or opens a diff it left out."""
+        self.counting = False
+        for path in sorted(self.defs.open) if self.defs else ():
+            self.def_seq(path)
+        meta, blobs = [], []
+        for s in self.seqs.values():
+            if s.sha:
+                lines = [" " + self.line_code(s.sha, s.path, r.new) for r in s.rows]
+                meta.append({"n": len(s.rows), "x": 1, "p": 1})
+            else:
+                lines = [r.kind + self.row_code(s.path, r) for r in s.rows]
+                meta.append({"n": len(s.rows), "x": int(s.full), "h": s.hunks})
+            data = base64.b64encode(zlib.compress("\n".join(lines).encode(), 9)).decode()
+            blobs.append(f'<script type="text/plain" id="_s{s.i}">{data}</script>')
+        self.counting = True
+        return f'<script type="application/json" id="_src">{json.dumps(meta, separators=(",", ":"))}</script>' + "".join(blobs)
+
+    # ---- definitions: uses carry data-d, a list of places in the manifest the page opens ----
+
+    def find_defs(self, story: list[Item]) -> Defs:
+        head, src = self.idx["head"], self.ix.src
+        # every file the page packs at head -> its lines the story itself shows
+        shown: dict[str, set[int]] = {f.path: set() for f in self.ix.files if f.status != "D" and not f.binary and self.whole(f)}
+
+        def placed(it: Item):
+            if it.name in ("diff", "ripple"):
+                hs = [self.hunks[a] for a in it.args if a in self.hunks]
+                m = re.fullmatch(r"(\d+)-(\d+)", it.kw.get("rows", "")) if len(hs) == 1 else None
+                for h in hs:
+                    yield h.path, h.rows[int(m[1]) - 1 : int(m[2])] if m else h.rows
+            elif it.name == "also" and it.args and (f := self.ix.file(it.args[0])):
+                for h in f.hunks:
+                    yield f.path, h.rows
+
+        def walk(items: list[Item]) -> None:
+            for it in items:
+                spec = parse_lines_spec(it.args) if it.kind == "dir" and it.name == "ctx" else None
+                if spec and spec[2] and spec[1] == "head":
+                    path, _, (a, b) = spec
+                    if path in shown or len((src.text(head, path) or "").encode()) in range(1, FOLD_MAX + 1):
+                        shown.setdefault(path, set()).update(range(a, b + 1))
+                for path, rows in placed(it) if it.kind == "dir" else ():
+                    if path in shown:
+                        shown[path].update(r.new for r in rows if r.new)
+                walk(it.children)
+
+        walk(story)
+        defs = Defs(src, self.ix.g, head, shown)
+        if defs.note:
+            self.notes.append(defs.note)
+        return defs
+
+    def def_seq(self, path: str) -> Seq | None:
+        """The source a definition in this file opens from: the file's diff when it changed, else the plain file."""
+        f = self.ix.file(path)
+        seq = self.diff_seq(f) if f else None
+        return seq if seq and seq.full else self.plain_seq(self.idx["head"], path)
+
+    def defs_json(self) -> str:
+        """Call after sources(): unfolded rows hand out ids too."""
+        out = []
+        places: dict[int, dict[int, int]] = {}  # source -> head line -> row
+        for d in self.def_ids:
+            seq = self.def_seq(d.path)
+            if seq.i not in places:
+                places[seq.i] = {r.new: i for i, r in enumerate(seq.rows) if r.kind != "-"}
+            at = places[seq.i][d.a]
+            out.append([seq.i, at, min(places[seq.i][d.b] - at + 1, DEF_ROWS), d.path, d.line])
+        return f'<script type="application/json" id="_def">{json.dumps(out, separators=(",", ":"))}</script>'
 
     def anchor(self, ref: str, h: str) -> None:
         self.refs.setdefault(ref, (h, []))[1].append(self.chapter)
@@ -1334,7 +1971,7 @@ class Renderer:
         self.last_fid = fid
         return fid
 
-    def frame_html(self, fid, kind, path, label, stats, stamp, body, hunk_ids, extra_attr="", fd="", fhash="", meta=None) -> str:
+    def frame_html(self, fid, kind, path, label, stats, stamp, body, hunk_ids, extra_attr="", fd="", fhash="", meta=None, src="") -> str:
         chip = '<span class="chip">Unchanged</span>' if kind == "ctx" and not self.tour else ""
         chip += f'<span class="chip">{esc(meta)}</span>' if meta else ""
         tools = (
@@ -1347,9 +1984,11 @@ class Renderer:
         return (
             f'<figure class="frame {kind}" id="{fid}" data-frame="{fid}" data-path="{esc(path)}" '
             f'data-hunks="{esc(json.dumps(hunk_ids))}" data-fd="{fd}" data-hash="{fhash}"{extra_attr}>'
-            f'<figcaption class="fh">{path_html(path)}<span class="sym">{esc(label)}</span>{chip}{stats}'
+            '<figcaption class="fh"><button class="fd-tog fh-tog" data-act="frame-toggle" aria-expanded="true" aria-label="Collapse">'
+            '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 6l4 4 4-4"/></svg></button>'
+            f'{path_html(path)}<span class="sym">{esc(label)}</span>{chip}{stats}'
             f'<span class="grow"></span><span class="fh-r">{stamp}{tools}</span></figcaption>'
-            f'<div class="code u">{body}</div></figure>'
+            f'<div class="code u"{src}>{body}</div></figure>'
         )
 
     def stamp(self, sha: str, path: str, a: int, b: int, worktree: bool) -> str:
@@ -1390,10 +2029,12 @@ class Renderer:
         fid = self.new_id(it.kw.get("id"), it.line)
         path = hs[0].path
         f = self.ix.file(path)
+        seq = self.diff_seq(f)
         parts, adds, dels, news, olds, shown = [], 0, 0, [], [], []
         prev: list[Row] | None = None
+        last, first_at = hs[0], 0
         for h in hs:
-            rows = h.rows
+            rows, at = h.rows, seq.start(h)
             if "rows" in it.kw:
                 if len(hs) > 1:
                     self.errors.append(f"story.md:{it.line}: rows= works with a single hunk")
@@ -1403,8 +2044,12 @@ class Renderer:
                     self.errors.append(f"story.md:{it.line}: rows={it.kw['rows']} is outside 1-{len(h.rows)} for {h.id}")
                     return ""
                 rows = h.rows[int(m[1]) - 1 : int(m[2])]
+                at += int(m[1]) - 1
             if prev is not None:
-                parts.append(self.gap_html(prev, rows))
+                parts.append(gap(gap_label(prev, rows, h.n != last.n + 1), at if seq.full else None))
+            else:
+                first_at = at
+            last = h
             parts.extend(self.row_html(h.path, r) for r in rows)
             adds += sum(r.kind == "+" for r in rows)
             dels += sum(r.kind == "-" for r in rows)
@@ -1422,6 +2067,7 @@ class Renderer:
         return self.frame_html(
             fid, "diff", path, label, stat_html(adds, dels), stamp, "".join(parts), [h.id for h in hs],
             url_attr("data-gh", self.gh_diff(path)), self.fd_hunk[hs[0].id], rows_hash(shown), f.meta if f else None,
+            self.src_attr(seq, first_at),
         )
 
     def d_ripple(self, it: Item) -> str:
@@ -1446,7 +2092,8 @@ class Renderer:
                 f'<div class="rip-site" data-hunk="{esc(h.id)}" data-path="{esc(h.path)}" data-fd="{self.fd_hunk[h.id]}"'
                 f'{url_attr("data-gh", self.gh_diff(h.path))}><div class="rip-sym">{where}{esc(h.header)}</div>'
             )
-            inner.append('<div class="code u">' + "".join(self.row_html(h.path, r) for r in h.rows) + "</div></div>")
+            seq = self.diff_seq(self.ix.file(h.path))
+            inner.append(f'<div class="code u"{self.src_attr(seq, seq.start(h))}>' + "".join(self.row_html(h.path, r) for r in h.rows) + "</div></div>")
         label = it.kw.get("label") or f"{len(it.args) - 1} more sites, same change"
         details = f'<details class="ripple"><summary>{esc(label)}</summary>{"".join(inner)}</details>'
         self.last_fid = fid
@@ -1471,23 +2118,19 @@ class Renderer:
             self.errors.append(f"story.md:{it.line}: {path}@{side} has {len(lines)} lines; {span(a, b)} is out of range")
             return ""
         fid = self.new_id(it.kw.get("id"), it.line)
-        rows = []
-        texts = []
-        for n in range(a, b + 1):
-            text = raw[n - 1].removesuffix("\r")
-            toks = lines[n - 1] if "".join(t for _, t in lines[n - 1]) == text else [("", text)]
-            texts.append(raw[n - 1])
-            rows.append(
-                f'<div class="row c" data-n="{n}"><span class="ln"></span><span class="ln">{n}</span><span class="sg"> </span>'
-                f'{code_open(text)}{pin_indent(self.render_code(toks, [], self.trace_ranges(text))) or " "}</code></div>'
-            )
-        h = digest("\n".join(texts))
+        rows = [
+            f'<div class="row c" data-n="{n}"><span class="ln"></span><span class="ln">{n}</span><span class="sg"> </span>'
+            f"{self.line_code(sha, path, n)}</div>"
+            for n in range(a, b + 1)
+        ]
+        h = digest("\n".join(raw[a - 1 : b]))
         self.anchor(f"{path}@{side}:{a}-{b}", h)
         self.frames[fid] = Frame(fid, set(range(a, b + 1)), self.chapter)
         stamp = self.stamp(sha, path, a, b, side == "head" and self.idx["worktree"])
         return self.frame_html(
             fid, "ctx", path, it.kw.get("title", ""), "", stamp, "".join(rows), [],
             url_attr("data-blob", self.gh_blob(sha, path)), self.fd_file.get(path, ""), h,
+            src=self.src_attr(self.plain_seq(sha, path), a - 1),
         )
 
     def d_tree(self, it: Item) -> str:
@@ -1532,15 +2175,24 @@ class Renderer:
             f'<div class="tree-body">{"".join(rows)}</div></figure>'
         )
 
-    def file_rows(self, f: FileDiff, fid: str, track: bool = True) -> str:
-        parts = [f'<div class="gap"><span>{esc(f.meta)}</span></div>'] if f.meta and f.hunks else []
+    def file_code(self, f: FileDiff, fid: str, lazy: bool = False) -> str:
+        """A file's whole diff. Lazy leaves the rows out and counts nothing as shown: the page fills each hunk in
+        from the file's source when the reader opens it."""
+        if not f.hunks:
+            return f'<div class="code u">{gap(esc(change_record(f)))}</div>'
+        seq = self.diff_seq(f)
+        parts = [gap(esc(f.meta))] if f.meta else []
         for i, h in enumerate(f.hunks):
+            label = gap_label(f.hunks[i - 1].rows, h.rows) if i else ""
+            if lazy:
+                parts.append(gap(label, seq.start(h), len(h.rows)))
+                continue
             if i:
-                parts.append(self.gap_html(f.hunks[i - 1].rows, h.rows))
+                parts.append(gap(label, seq.start(h) if seq.full else None))
             parts.extend(self.row_html(f.path, r) for r in h.rows)
-            if track:
-                self.cover(fid, h, h.rows)
-        return "".join(parts) or f'<div class="gap"><span>{esc(change_record(f))}</span></div>'
+            self.cover(fid, h, h.rows)
+        attr = f' data-src="{seq.i}"' if lazy else self.src_attr(seq, seq.start(f.hunks[0]))
+        return f'<div class="code u"{attr}>{"".join(parts)}</div>'
 
     def d_also(self, it: Item) -> str:
         if self.tour:
@@ -1559,7 +2211,7 @@ class Renderer:
         return (
             f'<details class="file-item" id="{fid}" data-frame="{fid}"{attr}><summary>{path_html(f.path)}{note}'
             f'<span class="grow"></span>{stat_html(f.adds, f.dels)}</summary>'
-            f'<div class="code u">{self.file_rows(f, fid)}</div></details>'
+            f"{self.file_code(f, fid)}</details>"
         )
 
     # ---- blocks ----
@@ -1700,6 +2352,8 @@ class Renderer:
     # ---- page ----
 
     def render(self, story: list[Item]) -> dict[str, str]:
+        if self.link:
+            self.defs = self.find_defs(story)
         h1 = next((i for i in story if i.kind == "h1"), None)
         self.title = re.sub(r"`", "", h1.text) if h1 else ""
         if not h1:
@@ -1785,7 +2439,7 @@ class Renderer:
             groups.setdefault(key, []).append(
                 f'<details class="file-item" id="{fid}"{attr}><summary>{path_html(f.path)}{note}'
                 f'<span class="grow"></span>{stat_html(f.adds, f.dels)}</summary>'
-                f'<div class="code u">{self.file_rows(f, fid, track=False)}</div></details>'
+                f"{self.file_code(f, fid, lazy=True)}</details>"
             )
         if not groups:
             return ""
@@ -1806,21 +2460,24 @@ class Renderer:
         for f in self.ix.files:
             fslug = self.fd_file[f.path]
             nav.append(f'<a href="#{fslug}" data-fd="{fslug}">{path_html(f.path)}{stat_html(f.adds, f.dels)}</a>')
+            # each hunk is its header alone: the page fills the rows in from the file's source when the diff opens
             hunks = []
             for h in f.hunks:
+                seq = self.diff_seq(f)
                 backs = "".join(
                     f'<button class="fd-back" data-goto="{x}">In story</button>' for x in dict.fromkeys(self.used.get(h.id, []))
                 )
                 news = [r.new for r in h.rows if r.new] or [0]
                 where = f"Lines {min(news)}–{max(news)}" if max(news) else "Removed lines"
                 hunks.append(
-                    f'<div class="fd-hunk" id="{self.fd_hunk[h.id]}"><div class="fd-hh"><span>{where}</span><code>{esc(h.header)}</code>'
-                    f'<span class="grow"></span>{backs}</div>'
-                    f'<div class="code u">{"".join(self.row_html(f.path, r) for r in h.rows)}</div></div>'
+                    f'<div class="gap fd-hh" id="{self.fd_hunk[h.id]}" data-at="{seq.start(h)}" data-len="{len(h.rows)}">'
+                    f'<span class="wh">{where}</span><code>{esc(h.header)}</code><span class="grow"></span>{backs}</div>'
                 )
+            if hunks:
+                hunks = [f'<div class="code u" data-src="{self.diff_seq(f).i}">{"".join(hunks)}</div>']
             if not f.hunks or f.meta:
                 record = f.meta if f.hunks else change_record(f)
-                hunks.insert(0, f'<div class="fd-hunk"><div class="fd-hh"><span>{esc(record)}</span></div></div>')
+                hunks.insert(0, f'<div class="fd-hh"><span class="wh">{esc(record)}</span></div>')
             status = {"A": "added", "D": "deleted", "R": "renamed", "C": "copied", "T": "type changed"}.get(f.status, "")
             attr = url_attr("data-gh", self.gh_diff(f.path))
             body.append(
@@ -2106,7 +2763,7 @@ def cmd_build(a: argparse.Namespace, write: bool = True) -> None:
 
 
 def build(a: argparse.Namespace, write: bool) -> None:
-    ix = load(a.dir)
+    ix = load(a.dir, marks=write)
     sp = ix.dir / "story.md"
     if not sp.exists():
         raise Fail(f"{sp} not found; write the story first")
@@ -2117,7 +2774,7 @@ def build(a: argparse.Namespace, write: bool) -> None:
             front_errors.append(ACCEPT_AGAIN)
         print("\n".join(f"error: {e}" for e in front_errors), file=sys.stderr)
         raise SystemExit(1)
-    r = Renderer(ix, front)
+    r = Renderer(ix, front, link=write)
     r.warnings += front_warnings
     parts = r.render(story)
     fulldiff = r.fulldiff()
@@ -2126,6 +2783,8 @@ def build(a: argparse.Namespace, write: bool) -> None:
     stale = [] if getattr(a, "accept", False) else stale_refs(ix, r.refs)
     for w in r.warnings:
         print(f"warning: {w}")
+    for n in r.notes:
+        print(f"note: {n}")
     problems = list(r.errors)
     if stale:
         problems.append(
@@ -2170,6 +2829,7 @@ def build(a: argparse.Namespace, write: bool) -> None:
         "hero": parts["hero"],
         "chapters": parts["chapters"],
         "fulldiff": fulldiff,
+        "sources": r.sources() + r.defs_json(),
     }
     tpl = (ASSETS / "template.html").read_text()
     page = re.sub(r"\{\{(\w+)\}\}", lambda mm: values[mm[1]], tpl)

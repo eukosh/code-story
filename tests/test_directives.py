@@ -110,7 +110,7 @@ def test_duplicate_id_identifies_first_owner(changed):
     assert "the chapter at story.md:5" in message
 
 
-@pytest.mark.parametrize("reserved", ["files", "side", "map", "help", "trace-pop", "syn-pick", "not-in-story", "fd-custom", "br-custom"])
+@pytest.mark.parametrize("reserved", ["files", "side", "map", "help", "trace-pop", "syn-pick", "not-in-story", "def", "fd-custom", "br-custom"])
 def test_page_ids_are_reserved(changed, reserved):
     changed.story(f"@also app.py id={reserved}")
     assert f"id '{reserved}' is taken by the page itself" in changed.build(ok=False).stderr

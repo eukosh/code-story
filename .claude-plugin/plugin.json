@@ -1,0 +1,9 @@
+{
+  "name": "code-story",
+  "description": "Turn a code change into a scroll-driven HTML review story, read in the order the code runs, with every line of code rendered from git.",
+  "author": { "name": "eukosh", "url": "https://github.com/eukosh" },
+  "homepage": "https://github.com/eukosh/code-story",
+  "repository": "https://github.com/eukosh/code-story",
+  "license": "MIT",
+  "keywords": ["code-review", "pull-request", "walkthrough", "diff"]
+}

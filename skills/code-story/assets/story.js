@@ -76,6 +76,8 @@
   // ---------- header: hides while reading down, returns on the way up ----------
 
   let lastY = scrollY;
+  let travel = 0; // how far the scroll has run in its current direction
+  let ptrY = Infinity;
   let hdrHidden = false;
   let quietUntil = 0;
   // scrolls the page makes itself (jumps, layout changes) must not hide the header
@@ -92,17 +94,24 @@
       // a long smooth scroll outlasts the window; keep it open until the scroll stops
       quietUntil = Math.max(quietUntil, now + 160);
       lastY = y;
+      travel = 0;
       return;
     }
     const d = y - lastY;
-    if (Math.abs(d) < 6) return;
-    if (d > 0 && y > 160 && pop.hidden) setHdr(true);
-    else if (d < 0) setHdr(false);
+    if (!d) return;
     lastY = y;
+    travel = d > 0 === travel > 0 ? travel + d : d;
+    // a few pixels back and forth (a resting hand, the tail of a fling) must not flip the header each time
+    if (Math.abs(travel) < 24) return;
+    if (travel < 0) setHdr(false);
+    // nor may scrolling hide it from under the pointer, to be shown again by the pointer's next twitch
+    else if (y > 160 && pop.hidden && ptrY >= 56) setHdr(true);
   }
   addEventListener("mousemove", (e) => {
-    if (hdrHidden && e.clientY < 56) setHdr(false);
+    ptrY = e.clientY;
+    if (hdrHidden && ptrY < 56) setHdr(false);
   });
+  root.addEventListener("mouseleave", () => (ptrY = Infinity));
   addEventListener("focusin", (e) => {
     if (e.target.closest && e.target.closest(".hdr")) setHdr(false);
   });
@@ -129,9 +138,12 @@
     return null;
   }
   let anchorRun = 0;
-  const cancelAnchor = () => anchorRun++;
-  addEventListener("wheel", cancelAnchor, { passive: true });
-  addEventListener("touchmove", cancelAnchor, { passive: true });
+  // wheel and touch are heard only while a run lasts: a standing wheel listener costs a hit test per scroll step
+  const HANDS = ["wheel", "touchmove"];
+  const cancelAnchor = () => {
+    anchorRun++;
+    for (const t of HANDS) removeEventListener(t, cancelAnchor);
+  };
   addEventListener("pointerdown", cancelAnchor, true);
   function keepAnchor(fn, ms = 480) {
     const run = ++anchorRun;
@@ -139,6 +151,7 @@
     const t0 = at ? at().getBoundingClientRect().top : 0;
     fn();
     if (!at) return;
+    for (const t of HANDS) addEventListener(t, cancelAnchor, { passive: true });
     quiet(ms + 300);
     const end = performance.now() + ms;
     const tick = () => {
@@ -149,6 +162,7 @@
         if (Math.abs(d) > 0.5) scrollTo({ top: scrollY + d, behavior: "instant" });
       }
       if (performance.now() < end) requestAnimationFrame(tick);
+      else cancelAnchor();
     };
     tick();
   }
@@ -159,7 +173,11 @@
     for (let b = el.closest(".branch-wrap"); b; b = b.parentElement.closest(".branch-wrap")) brs.unshift(b);
     for (const br of brs) if (!br.classList.contains("open")) setBranch(br, true, { instant: true });
     for (let d = el.closest("details"); d; d = d.parentElement && d.parentElement.closest("details")) d.open = true;
+    const f = el.closest("figure.frame");
+    if (f && f !== el && !el.closest(".fh")) setFrame(f, false);
   }
+  // what stands in for `el` on screen: its copy in the split view while that shows
+  const vis = (el) => (el._c && el.parentElement.hidden ? el._c : el);
   function goTo(el, { block = "start", glow = true } = {}) {
     reveal(el);
     quiet();
@@ -182,7 +200,7 @@
       return h;
     }
     const n = side === "L" ? row.dataset.o : row.dataset.n;
-    h.className = `half ${kindOf(row)}`;
+    h.className = `half ${kindOf(row)}${row.classList.contains("x") ? " x" : ""}`;
     h.dataset.line = n;
     h.innerHTML = `<span class="ln">${n}</span>${row.querySelector(".sg").outerHTML}${row.querySelector("code").outerHTML}`;
     return h;
@@ -214,8 +232,17 @@
     const kids = [...u.children];
     for (let i = 0; i < kids.length; ) {
       const k = kids[i];
-      if (!k.classList.contains("row") || kindOf(k) === "c") {
-        s.append(k.classList.contains("row") ? srow(k, k) : k.cloneNode(true));
+      if (!k.classList.contains("row")) {
+        const c = k.cloneNode(true);
+        c.removeAttribute("id");
+        c._u = k;
+        k._c = c;
+        s.append(c);
+        i++;
+        continue;
+      }
+      if (kindOf(k) === "c") {
+        s.append(srow(k, k));
         i++;
         continue;
       }
@@ -229,7 +256,7 @@
     return s;
   }
   const hasSplit = (u) => u.nextElementSibling && u.nextElementSibling.matches(".code.s");
-  const SPLITTABLE = "figure.frame.diff > .code.u, .rip-site > .code.u, details.file-item > .code.u, .fd-hunk > .code.u";
+  const SPLITTABLE = "figure.frame.diff > .code.u, .rip-site > .code.u, details.file-item > .code.u, .fd-body > .code.u";
 
   let view = store.get("view", "unified");
   // halves are unreadable below this content width (phones, or a wide map beside a small window)
@@ -245,15 +272,21 @@
   let fdRoomy = true;
   const canSplit = () => !TOUR && !narrow.matches && roomy;
   const effView = () => (canSplit() ? view : "unified");
+  function syncView(u, on = effView() === "split") {
+    const here = on && (fdRoomy || !u.closest("#files"));
+    // halves are built on first use, and never for rows the page hasn't filled in yet
+    if (!hasSplit(u) && (!here || (u._lazy && !u._done))) return;
+    const s = hasSplit(u) ? u.nextElementSibling : buildSplit(u);
+    u.hidden = here;
+    s.hidden = !here;
+  }
+  function syncViews() {
+    const on = effView() === "split";
+    for (const u of $$(SPLITTABLE)) syncView(u, on);
+  }
   function applyView() {
     const on = effView() === "split";
-    for (const u of $$(SPLITTABLE)) {
-      const here = on && (fdRoomy || !u.closest("#files"));
-      if (!here && !hasSplit(u)) continue;
-      const s = hasSplit(u) ? u.nextElementSibling : buildSplit(u);
-      u.hidden = here;
-      s.hidden = !here;
-    }
+    syncViews();
     $$('[data-act="view"]').forEach((b) => {
       b.setAttribute("aria-pressed", String(b.dataset.view === effView()));
       if (b.dataset.view === "split") {
@@ -270,6 +303,396 @@
     view = v;
     store.set("view", v);
     keepAnchor(applyView, 120);
+  }
+
+  // ---------- more of a file: each one is packed into the page once and inflated when asked for ----------
+
+  const STEP = 20;
+  let srcMeta = [];
+  try {
+    srcMeta = JSON.parse($("#_src")?.textContent || "[]");
+  } catch {}
+  const canInflate = "DecompressionStream" in window;
+  const srcs = new Map();
+  // a source's lines ("-<code>…</code>": the row's sign, then its code) with their old and new line numbers
+  function source(i) {
+    if (!srcs.has(i))
+      srcs.set(
+        i,
+        (async () => {
+          const bytes = Uint8Array.from(atob($(`#_s${i}`).textContent), (c) => c.charCodeAt(0));
+          const text = await new Response(new Blob([bytes]).stream().pipeThrough(new DecompressionStream("deflate"))).text();
+          const lines = text.split("\n");
+          const O = new Int32Array(lines.length);
+          const N = new Int32Array(lines.length);
+          const hs = srcMeta[i].h || [];
+          let o = 1;
+          let n = 1;
+          let h = 0;
+          for (let k = 0; k < lines.length; k++) {
+            if (h < hs.length && hs[h][0] === k) [, , o, n] = hs[h++];
+            const c = lines[k][0];
+            if (c !== "+") O[k] = o++;
+            if (c !== "-") N[k] = n++;
+          }
+          return { lines, O, N, plain: !!srcMeta[i].p };
+        })(),
+      );
+    return srcs.get(i);
+  }
+  const noSource = () => toast("This browser can't unpack the page's code");
+  const KINDS = { " ": "c", "-": "d", "+": "a" };
+  function makeRows(src, a, b, cls) {
+    let html = "";
+    for (let k = a; k < b; k++) {
+      const ln = src.lines[k];
+      const o = src.O[k] || "";
+      const n = src.N[k] || "";
+      html += src.plain
+        ? `<div class="row c${cls}" data-n="${n}"><span class="ln"></span><span class="ln">${n}</span><span class="sg"> </span>${ln.slice(1)}</div>`
+        : `<div class="row ${KINDS[ln[0]]}${cls}" data-o="${o}" data-n="${n}"><span class="ln">${o}</span><span class="ln">${n}</span><span class="sg">${ln[0]}</span>${ln.slice(1)}</div>`;
+    }
+    const t = document.createElement("template");
+    t.innerHTML = html;
+    let k = a;
+    for (const r of t.content.children) r._i = k++;
+    return t.content;
+  }
+
+  const isRow = (el) => el.classList.contains("row");
+  const rowBefore = (el) => {
+    for (let e = el.previousElementSibling; e; e = e.previousElementSibling) if (isRow(e)) return e;
+  };
+  const rowAfter = (el) => {
+    for (let e = el.nextElementSibling; e; e = e.nextElementSibling) if (isRow(e)) return e;
+  };
+  const gapsOf = (u) => [...u.children].filter((el) => el._hi != null);
+  function newGap(u, lo, hi, before) {
+    const g = document.createElement("div");
+    g.className = "gap gj";
+    g.innerHTML = "<span></span>";
+    g._lo = lo;
+    g._hi = hi;
+    u.insertBefore(g, before);
+  }
+  // number the rows a container shows by their place in its source, and note what each break hides
+  function setup(u) {
+    const m = srcMeta[u.dataset.src];
+    const x = m.x && canInflate;
+    let idx = 0;
+    let first = u.dataset.at;
+    for (const el of [...u.children]) {
+      if (isRow(el)) {
+        if (first != null) {
+          if (x && +first > idx) newGap(u, idx, +first, el);
+          idx = +first;
+          first = null;
+        }
+        el._i = idx++;
+      } else if (el.dataset.at != null) {
+        first = null;
+        el._lo = x ? idx : +el.dataset.at;
+        el._hi = idx = +el.dataset.at;
+      }
+    }
+    if (x && idx < m.n) newGap(u, idx, m.n, null);
+    gapsOf(u).forEach((g) => drawGap(g));
+  }
+  const icon = (d, dots) => `<svg viewBox="0 0 16 16" aria-hidden="true"><path d="${d}"/><path class="dots" d="${dots}"/></svg>`;
+  const ICON = {
+    up: icon("M8 13.5v-8M4.5 8.5L8 5l3.5 3.5", "M2.5 2.5h11"),
+    down: icon("M8 2.5v8M4.5 7.5L8 11l3.5-3.5", "M2.5 13.5h11"),
+    all: icon("M8 6V1.5M5.5 4L8 1.5 10.5 4M8 10v4.5M5.5 12L8 14.5l2.5-2.5", "M2.5 8h11"),
+    fold: icon("M8 1.5V6M5.5 3.5L8 6l2.5-2.5M8 14.5V10M5.5 12.5L8 10l2.5 2.5", "M2.5 8h11"),
+  };
+  // a gap's buttons and words, from what it still hides; `src` lets it name the lines
+  function drawGap(g, src) {
+    const n = g._hi - g._lo;
+    const header = g.classList.contains("fd-hh");
+    let gx = g.querySelector(":scope > .gx");
+    if (n <= 0) {
+      gx?.remove();
+      g.classList.remove("has-x");
+      // a hunk header stays; a break written by the build hides, so folding back can restore it
+      if (g.classList.contains("gj")) g.remove();
+      else if (!header) g.hidden = !!g._spent || !g.textContent.trim();
+      return;
+    }
+    const lead = !rowBefore(g);
+    const trail = !rowAfter(g);
+    const acts = n <= STEP ? ["all"] : lead ? ["up", "all"] : trail ? ["down", "all"] : ["up", "down", "all"];
+    if (!gx) {
+      gx = document.createElement("span");
+      gx.className = "gx";
+      g.prepend(gx);
+      g.classList.add("has-x");
+    }
+    if (gx._acts !== String(acts)) {
+      gx._acts = String(acts);
+      gx.innerHTML = acts.map((a) => `<button type="button" class="gb" data-act="unfold" data-x="${a}">${ICON[a]}</button>`).join("");
+    }
+    const lines = (k) => `${k} line${k === 1 ? "" : "s"}`;
+    const say = { up: `Expand up: ${STEP} more lines`, down: `Expand down: ${STEP} more lines`, all: `Show all ${lines(n)} hidden here (shift-click: the whole file)` };
+    for (const b of gx.children) b.setAttribute("aria-label", (b.title = say[b.dataset.x]));
+    if (header) return;
+    const label = g.querySelector(":scope > span:not(.gx)");
+    if (g._txt == null) g._txt = label.textContent;
+    if (lead) label.textContent = `${lines(n)} above`;
+    else if (trail) label.textContent = `${lines(n)} below`;
+    else if (src) {
+      let a = 0;
+      let b = 0;
+      let changed = false;
+      for (let k = g._lo; k < g._hi; k++) {
+        if (src.N[k]) (a = a || src.N[k]), (b = src.N[k]);
+        changed = changed || src.lines[k][0] !== " ";
+      }
+      label.textContent = a ? `${a === b ? `line ${a}` : `lines ${a}–${b}`} ${changed ? "not shown" : "unchanged"}` : `${lines(n)} not shown`;
+    }
+  }
+  // run fn, then scroll so `ref` (a row or a gap) sits where it did
+  function holding(ref, u, fn) {
+    const el = () => (!ref || !ref.isConnected || ref.hidden ? null : isRow(ref) ? shown(ref) : vis(ref));
+    const top = el()?.getBoundingClientRect().top;
+    fn();
+    const now = el();
+    if (top == null || !now) return;
+    const d = now.getBoundingClientRect().top - top;
+    if (Math.abs(d) < 0.5) return;
+    cancelAnchor();
+    quiet(600);
+    const box = u.closest(".files-body, .def-body");
+    if (box) box.scrollTop += d;
+    else scrollTo({ top: scrollY + d, behavior: "instant" });
+  }
+  // a container's rows changed: rebuild its split copy and the things drawn against it
+  function touched(u) {
+    if (hasSplit(u)) {
+      const old = u.nextElementSibling;
+      buildSplit(u).hidden = old.hidden;
+      old.remove();
+    }
+    const host = u.closest(HOST);
+    if (!host) return void (u.closest("#def") && placeDef());
+    const any = !!host.querySelector(".row.x");
+    if (any && !host._fold) {
+      const b = (host._fold = document.createElement("button"));
+      b.type = "button";
+      b.className = "fbtn ico";
+      b.dataset.act = "refold";
+      b.setAttribute("aria-label", (b.title = "Hide the lines you unfolded"));
+      b.innerHTML = ICON.fold;
+      if (host.matches("figure")) $(".fh-r", host).prepend(b);
+      else $(host.matches("details") ? "summary" : ".fd-head", host).append(b);
+    }
+    if (host._fold) host._fold.hidden = !any;
+    paintRows();
+    queueWires();
+  }
+  function open1(g, dir, src, n = STEP) {
+    let a = g._lo;
+    let b = g._hi;
+    if (dir === "down") b = Math.min(b, a + n);
+    if (dir === "up") a = Math.max(a, b - n);
+    const rows = makeRows(src, a, b, " x");
+    if (traceOn) for (const t of rows.querySelectorAll(`.tr[data-tr="${traceOn}"]`)) t.classList.add("on");
+    if (dir === "up") g.after(rows), (g._hi = a);
+    else g.before(rows), (g._lo = b);
+    g._spent = g._hi <= g._lo;
+    drawGap(g, src);
+  }
+  async function unfold(g, dir, whole) {
+    const u = g.parentElement;
+    let src;
+    try {
+      src = await source(u.dataset.src);
+    } catch {
+      return noSource();
+    }
+    if (g.parentElement !== u || g._hi <= g._lo) return;
+    const focused = document.activeElement?.closest(".gap") === vis(g);
+    // a step down keeps its button under the pointer; everything else keeps the code that was already there
+    const ref = whole || dir === "all" ? (rowBefore(g) ? rowBefore(g) : rowAfter(g)) : dir === "down" ? g : null;
+    holding(ref, u, () => {
+      if (whole) for (const x of gapsOf(u)) x._hi > x._lo && open1(x, "all", src);
+      else open1(g, dir, src);
+      touched(u);
+    });
+    if (focused && g.isConnected) (vis(g).querySelector(`[data-x="${dir}"]`) || vis(g).querySelector(".gb"))?.focus({ preventScroll: true });
+  }
+  function refold(host) {
+    const us = $$(".code.u[data-src]", host).filter((u) => u.closest(HOST) === host);
+    const kept = us.flatMap((u) => [...u.children].filter((el) => isRow(el) && !el.classList.contains("x")));
+    // keep the first of the story's own rows that is still on screen where it is
+    const ref = kept.find((r) => shown(r).getBoundingClientRect().bottom > 100) || kept[kept.length - 1];
+    holding(ref, us[0], () => {
+      for (const u of us) {
+        if (!u.querySelector(":scope > .x")) continue;
+        for (const el of [...u.children]) {
+          if (el.classList.contains("x") || el.classList.contains("gj")) el.remove();
+          else if (el._hi != null) {
+            el.hidden = false;
+            el._spent = false;
+            if (el._txt != null) el.querySelector(":scope > span:not(.gx)").textContent = el._txt;
+          }
+        }
+        setup(u);
+        touched(u);
+      }
+    });
+    if (sel.rows.some((r) => !r.isConnected)) select(sel.host, sel.rows.filter((r) => r.isConnected));
+    if (anchor && !anchor.isConnected) anchor = null;
+  }
+  // A link can name lines its reader had unfolded. Unfold from the nearer edge of each break as far as
+  // the lines `keys` name ("R120", "L7"), so the link finds them again.
+  async function expose(host, keys) {
+    for (const u of $$(".code.u[data-src]", host)) {
+      if (u.closest(HOST) !== host || !srcMeta[u.dataset.src].x || !canInflate) continue;
+      const src = await source(u.dataset.src).catch(() => null);
+      const at = src ? keys.map((k) => (k[0] === "L" ? src.O : src.N).indexOf(+k.slice(1))) : [];
+      if (at.includes(-1) || !at.length) continue;
+      const lo = Math.min(...at);
+      const hi = Math.max(...at) + 1;
+      let changed = false;
+      for (const g of gapsOf(u)) {
+        const a = Math.max(g._lo, lo);
+        const b = Math.min(g._hi, hi);
+        if (a >= b) continue;
+        if (b - g._lo <= g._hi - a) open1(g, "down", src, b - g._lo);
+        else open1(g, "up", src, g._hi - a);
+        changed = true;
+      }
+      if (changed) touched(u);
+    }
+  }
+  // rows the page left out (the full diff, files outside the story) come from the source on first use
+  function ready(u) {
+    if (!u._lazy) return Promise.resolve();
+    return (u._ready ||= source(u.dataset.src).then((src) => {
+      // in the open full diff a file may fill in above the reader: what they see must not move.
+      // Only a file wholly above counts; one the reader is inside grows below them.
+      const box = !files.hidden && u.closest(".files-body");
+      const above = box && u.getBoundingClientRect().bottom <= box.getBoundingClientRect().top;
+      const h = above ? u.parentElement.offsetHeight : 0;
+      for (const g of [...u.children]) {
+        const a = +g.dataset.at;
+        if (g.dataset.len != null) g.after(makeRows(src, a, a + +g.dataset.len, ""));
+      }
+      u._done = true;
+      u.style.minHeight = "";
+      setup(u);
+      syncView(u);
+      if (above) box.scrollTop += u.parentElement.offsetHeight - h;
+    }, noSource));
+  }
+  const fillIn = (el) => Promise.all($$(".code.u[data-src]", el).map(ready));
+
+  // ---------- definitions: a name with data-d opens where it is defined, from the page's own sources ----------
+
+  let defMeta = [];
+  try {
+    defMeta = JSON.parse($("#_def")?.textContent || "[]");
+  } catch {}
+  const defEl = $("#def");
+  const defBody = $(".def-body", defEl);
+  let defNow = null; // { ids, k }: the candidates of the name that was clicked, and the one on show
+  const defHead = $(".def-h", defEl);
+  let defPos = null; // where the reader dragged the panel; null while the page decides
+  // Put the panel where the reader left it, else top right, and inside the window. Opened by a click at
+  // `pt`, it never lands on the name that was clicked: it goes under that line, or above it.
+  function placeDef(pt) {
+    if (defEl.hidden) return;
+    if (narrow.matches) return void (defEl.style.left = defEl.style.top = defEl.style.right = "");
+    const w = defEl.offsetWidth;
+    const h = defEl.offsetHeight;
+    const keep = !pt && defEl.style.left;
+    const left = clamp(keep ? defEl.offsetLeft : defPos ? defPos.x : innerWidth, 8, Math.max(8, innerWidth - w - 12));
+    let top = clamp(keep ? defEl.offsetTop : defPos ? defPos.y : 64, 8, Math.max(8, innerHeight - h - 8));
+    if (pt && pt.x > left - 8 && pt.x < left + w + 8 && pt.y > top - 8 && pt.y < top + h + 8) {
+      const below = pt.y + 22;
+      const above = pt.y - 22 - h;
+      top = below + h <= innerHeight - 8 ? below : above >= 8 ? above : pt.y < innerHeight / 2 ? innerHeight - h - 8 : 8;
+    }
+    defEl.style.left = `${left}px`;
+    defEl.style.top = `${top}px`;
+    defEl.style.right = "auto";
+  }
+  defHead.addEventListener("pointerdown", (e) => {
+    if (e.button !== 0 || narrow.matches || e.target.closest("button, .path")) return;
+    e.preventDefault();
+    defHead.setPointerCapture(e.pointerId);
+    // measured once: a move only sets a transform, which costs no layout and no paint
+    const x0 = defEl.offsetLeft;
+    const y0 = defEl.offsetTop;
+    const maxX = Math.max(8, innerWidth - defEl.offsetWidth - 12);
+    const maxY = Math.max(8, innerHeight - defEl.offsetHeight - 8);
+    const dx = x0 - e.clientX;
+    const dy = y0 - e.clientY;
+    let moved = false;
+    const move = (ev) => {
+      moved = true;
+      defPos = { x: clamp(dx + ev.clientX, 8, maxX), y: clamp(dy + ev.clientY, 8, maxY) };
+      defEl.style.transform = `translate(${defPos.x - x0}px, ${defPos.y - y0}px)`;
+    };
+    const up = () => {
+      for (const t of ["pointermove", "pointerup", "pointercancel"]) defHead.removeEventListener(t, t === "pointermove" ? move : up);
+      if (!moved) return;
+      defEl.style.transform = "";
+      defEl.style.left = `${defPos.x}px`;
+      defEl.style.top = `${defPos.y}px`;
+      defEl.style.right = "auto";
+    };
+    defHead.addEventListener("pointermove", move);
+    defHead.addEventListener("pointerup", up);
+    defHead.addEventListener("pointercancel", up);
+  });
+  defHead.addEventListener("dblclick", (e) => {
+    if (e.target.closest("button, .path")) return;
+    defPos = null;
+    defEl.style.left = "";
+    placeDef();
+  });
+  addEventListener("resize", () => placeDef());
+  let defTurn = 0; // every open and close takes one, so a slow load cannot show over what came after it
+  async function showDef(ids, k = 0, pt = null) {
+    const m = defMeta[ids[k]];
+    if (!m) return;
+    const turn = ++defTurn;
+    let src;
+    try {
+      src = await source(m[0]);
+    } catch {
+      return noSource();
+    }
+    if (turn !== defTurn) return;
+    const [i, at, len, path, line] = m;
+    defNow = { ids, k };
+    const cut = path.lastIndexOf("/") + 1;
+    const dir = document.createElement("span");
+    dir.className = "dir";
+    dir.textContent = path.slice(0, cut);
+    const no = document.createElement("b");
+    no.textContent = `:${line}`;
+    $(".path", defEl).replaceChildren(dir, path.slice(cut), no);
+    const u = document.createElement("div");
+    u.className = "code u";
+    u.dataset.src = i;
+    u.dataset.at = at;
+    u.append(makeRows(src, at, at + len, ""));
+    if (traceOn) for (const t of u.querySelectorAll(`.tr[data-tr="${traceOn}"]`)) t.classList.add("on");
+    defBody.replaceChildren(u);
+    setup(u);
+    $(".def-nav", defEl).hidden = ids.length < 2;
+    $(".def-n", defEl).textContent = `${k + 1} of ${ids.length}`;
+    defEl.hidden = false;
+    defBody.scrollTop = 0;
+    placeDef(pt);
+  }
+  function closeDef() {
+    defTurn++;
+    defEl.hidden = true;
+    defBody.replaceChildren();
+    defNow = null;
   }
 
   // ---------- story map ----------
@@ -328,10 +751,21 @@
   }
 
   let active = null;
+  // The map moves while the page scrolls, so its bars are scaled, never sized: a height or width in motion
+  // lays the page out and repaints the story on every frame of the transition.
+  const setBar = (part) => ($(".side-f .bar i").style.transform = `scaleX(${part})`);
+  function placeFill() {
+    const li = nodes.get(active);
+    const fill = $(".fill", map);
+    if (li && fill) fill.style.transform = `scaleY(${clamp((li.offsetTop + 4) / (fill.offsetHeight || 1), 0, 1)})`;
+  }
   function spy() {
     const y = innerHeight * 0.36;
     let cur = chapters[0];
     for (const ch of chapters) if (ch.getBoundingClientRect().top <= y) cur = ch;
+    // resting right on a boundary must not flip the map between two chapters
+    const edge = active && chapters.indexOf(cur) > chapters.indexOf(active) ? cur : active;
+    if (cur !== active && edge && Math.abs(edge.getBoundingClientRect().top - y) < 8) return;
     if (cur !== active) {
       active = cur;
       updateMap();
@@ -348,17 +782,16 @@
     if (TOUR) {
       const numbered = chapters.filter((c) => c.dataset.chapter !== "appendix");
       const k = numbered.includes(active) ? numbered.indexOf(active) + 1 : numbered.length;
-      $(".side-f .bar i").style.width = `${(100 * k) / (numbered.length || 1)}%`;
+      setBar(k / (numbered.length || 1));
       $(".side-f .f-txt").textContent = `Chapter ${k} of ${numbered.length}`;
     }
+    placeFill();
     const li = nodes.get(active);
-    const fill = $(".fill", map);
-    if (li && fill) fill.style.height = `${Math.max(0, li.offsetTop + 4)}px`;
     if (li && !side.matches(":hover")) {
       const sc = $(".side-scroll", side);
       const r = li.getBoundingClientRect();
       const b = sc.getBoundingClientRect();
-      if (b.height && (r.top < b.top || r.bottom > b.bottom)) sc.scrollTop += r.top - b.top - b.height / 3;
+      if (b.height && (r.top < b.top || r.bottom > b.bottom)) sc.scrollTo({ top: sc.scrollTop + r.top - b.top - b.height / 3, behavior: smooth() });
     }
   }
 
@@ -695,7 +1128,7 @@
       const b = $('.fh [data-act="reviewed"]', f);
       if (b) {
         b.setAttribute("aria-pressed", String(on));
-        b.title = on ? "Reviewed (r to undo)" : "Mark reviewed (r)";
+        b.title = on ? "Reviewed: click to undo" : "Mark reviewed (r)";
       }
     }
     const done = diffFrames.filter(isReviewed).length;
@@ -706,7 +1139,7 @@
     bar.style.strokeDashoffset = c * (1 - done / (n || 1));
     $(".progress .p-txt").textContent = `${done}/${n} reviewed`;
     $(".progress").title = `${done} of ${n} changed frames reviewed`;
-    $(".side-f .bar i").style.width = `${(100 * done) / (n || 1)}%`;
+    setBar(done / (n || 1));
     $(".side-f .f-txt").textContent = `${done} of ${n} frames reviewed`;
     for (const [ch, li] of nodes) {
       const own = diffFrames.filter((f) => ch.contains(f));
@@ -717,6 +1150,25 @@
     isReviewed(f) ? reviewed.delete(rkey(f)) : reviewed.add(rkey(f));
     store.set("reviewed", [...reviewed]);
     refreshReviewed();
+    setFrame(f, isReviewed(f));
+  }
+
+  // ---------- frames fold to their header ----------
+
+  function setFrame(f, collapsed, settle = true) {
+    if (f.classList.contains("collapsed") === collapsed) return;
+    f.classList.toggle("collapsed", collapsed);
+    const b = $(":scope > .fh > .fh-tog", f);
+    b.setAttribute("aria-expanded", String(!collapsed));
+    b.setAttribute("aria-label", collapsed ? "Expand" : "Collapse");
+    // folded from the keyboard, the header can be off screen above the code that just went: bring it back
+    const top = settle && collapsed && f.getClientRects().length ? f.getBoundingClientRect().top : Infinity;
+    if (top < 64) {
+      cancelAnchor();
+      quiet(600);
+      scrollTo({ top: scrollY + top - 90, behavior: "instant" });
+    }
+    queueWires();
   }
 
   // ---------- trees: a listed file that a frame shows jumps there ----------
@@ -814,6 +1266,7 @@
     if (!g) return;
     const spans = traceSpans(g);
     spans.forEach((x) => x.classList.add("on"));
+    for (const x of $$(`.tr[data-tr="${g}"]`, defEl)) x.classList.add("on");
     lit = [...new Set(spans.map(holder).filter(Boolean))];
     lit.forEach((f) => f.classList.add("lit"));
     const counts = new Map();
@@ -830,9 +1283,16 @@
       $(".cnt", li).textContent = c;
     }
     $(".tp-name").textContent = traceNames[g] || g;
-    $(".tp-count").textContent = `${lit.length} ${lit.length === 1 ? "frame" : "frames"}`;
     traceIdx = origin ? lit.indexOf(holder(origin)) : -1;
     if (traceIdx >= 0) lit[traceIdx].classList.add("current");
+    showTraceAt();
+  }
+  // where the reader stands among the frames a trace lights: "4 / 16" once one of them is current
+  function showTraceAt() {
+    const n = lit.length;
+    const c = $(".tp-count");
+    c.textContent = traceIdx >= 0 ? `${traceIdx + 1} / ${n}` : `${n} ${n === 1 ? "frame" : "frames"}`;
+    c.title = traceIdx >= 0 ? `Frame ${traceIdx + 1} of ${n} that show it` : "";
   }
   function stepTrace(d) {
     if (!traceOn || !lit.length) return;
@@ -840,7 +1300,9 @@
     traceIdx = (traceIdx + d + lit.length) % lit.length;
     const f = lit[traceIdx];
     f.classList.add("current");
+    showTraceAt();
     reveal(f);
+    if (f.matches("figure.frame")) setFrame(f, false);
     quiet(1200);
     requestAnimationFrame(() => f.scrollIntoView({ behavior: smooth(), block: "center" }));
   }
@@ -913,6 +1375,7 @@
   function syncModals() {
     const any = modals.length > 0;
     for (const el of [app, ...$$(".hdr"), pop]) el.inert = any;
+    defEl.inert = modals.some((m) => m.el.id === "help"); // it stays in use over the full diff
     pill.inert = any || !traceOn;
     modals.forEach((m, i) => (m.el.inert = i < modals.length - 1));
   }
@@ -985,7 +1448,7 @@
   function scrollFd(el, pad = 12) {
     fdBody.scrollTop += el.getBoundingClientRect().top - fdBody.getBoundingClientRect().top - pad;
   }
-  function openFiles(frame, target) {
+  async function openFiles(frame, target) {
     if (files.hidden) {
       files.hidden = false;
       body.classList.add("files-open");
@@ -997,10 +1460,31 @@
     if (target) {
       const file = target.closest(".fd-file");
       if (file) setFdFile(file, false);
-      scrollFd(target, 60);
-      flash(target);
+      await fillIn(file || target);
+      scrollFd(vis(target), 60);
+      flash(vis(target));
     }
     fdSpy();
+    fdFill();
+  }
+  // the full diff's rows come in a file at a time: whatever is near the screen at once, the rest in the
+  // background, so opening it never waits on the whole diff and searching the page soon finds all of it
+  const fdLazy = $$(".code.u[data-src]", files);
+  const ROW_H = 21.5;
+  for (const u of fdLazy) u.style.minHeight = `${ROW_H * $$("[data-len]", u).reduce((n, g) => n + +g.dataset.len, 0)}px`;
+  let fdTimer = 0;
+  let fdTodo = fdLazy;
+  function fdFill() {
+    clearTimeout(fdTimer);
+    fdTodo = fdTodo.filter((u) => !u._ready);
+    if (!fdTodo.length || files.hidden) return;
+    const box = fdBody.getBoundingClientRect();
+    const near = fdTodo.filter((u) => {
+      const r = u.getBoundingClientRect();
+      return r.height && r.bottom > box.top - box.height && r.top < box.bottom + box.height;
+    });
+    (near.length ? near : fdTodo.slice(0, 1)).forEach(ready);
+    fdTimer = setTimeout(fdFill, 40);
   }
   function closeFiles() {
     if (files.hidden) return;
@@ -1008,30 +1492,48 @@
     body.classList.remove("files-open");
     closeModal(files);
   }
-  function setFdFile(file, collapsed) {
+  function setFdFile(file, collapsed, sync = true) {
     file.classList.toggle("collapsed", collapsed);
     const b = $(".fd-tog", file);
     b.setAttribute("aria-expanded", String(!collapsed));
     b.setAttribute("aria-label", collapsed ? "Expand file" : "Collapse file");
-    syncFdAll();
+    if (sync) syncFdAll(), fdFill();
   }
   function syncFdAll() {
     const anyOpen = $$(".fd-file", files).some((f) => !f.classList.contains("collapsed"));
     $('[data-act="fd-all"]', files).textContent = anyOpen ? "Collapse all" : "Expand all";
   }
+  const fdFiles = $$(".fd-file", files);
+  const fdLinks = new Map($$(".files-nav a", files).map((a) => [a.dataset.fd, a]));
+  let fdCur = null;
   function fdSpy() {
     const top = fdBody.getBoundingClientRect().top + 40;
-    let cur = null;
-    for (const f of $$(".fd-file", files)) if (f.getBoundingClientRect().top <= top) cur = f;
-    cur = cur || $(".fd-file", files);
-    $$(".files-nav a", files).forEach((a) => {
-      const on = !!cur && a.dataset.fd === cur.id;
-      a.classList.toggle("cur", on);
-      if (on) a.setAttribute("aria-current", "true");
-      else a.removeAttribute("aria-current");
-    });
+    let cur = fdFiles[0];
+    for (const f of fdFiles) {
+      if (f.getBoundingClientRect().top > top) break;
+      cur = f;
+    }
+    if (cur === fdCur) return;
+    const was = fdCur && fdLinks.get(fdCur.id);
+    if (was) was.classList.remove("cur"), was.removeAttribute("aria-current");
+    fdCur = cur;
+    const a = cur && fdLinks.get(cur.id);
+    if (a) a.classList.add("cur"), a.setAttribute("aria-current", "true");
   }
-  fdBody.addEventListener("scroll", () => requestAnimationFrame(fdSpy), { passive: true });
+  let fdTick = false;
+  fdBody.addEventListener(
+    "scroll",
+    () => {
+      if (fdTick) return;
+      fdTick = true;
+      requestAnimationFrame(() => {
+        fdTick = false;
+        fdSpy();
+        fdFill();
+      });
+    },
+    { passive: true },
+  );
   const fdHandle = $(".files-resize", files);
   dragResize(
     fdHandle,
@@ -1094,14 +1596,38 @@
     gh.title = `Open line ${line.dataset.n || line.dataset.o || line.dataset.line} on GitHub`;
     if (gh.parentElement !== line) line.prepend(gh);
   }
-  document.addEventListener("mouseover", (e) => {
-    const line = e.target.closest(".row, .half");
+  // Hover on code is set here, not by :hover. The browser also hovers whatever scrolls under a resting
+  // pointer, which lit and repainted a row on every frame of a scroll; while one runs, the last target waits.
+  let hov = null;
+  let hovNext = null;
+  let scrollT = 0;
+  function hover(el) {
+    const line = el.closest(".row, .half");
+    if (line !== hov) {
+      hov?.classList.remove("hov");
+      hov = line;
+      line?.classList.add("hov");
+    }
     if (line && !narrow.matches) putGh(line);
-    onHoverLinks(e);
-  });
+    onHoverLinks(el);
+  }
+  document.addEventListener("mouseover", (e) => (scrollT ? (hovNext = e.target) : hover(e.target)));
+  root.addEventListener("mouseleave", () => hover(root));
+  addEventListener(
+    "scroll",
+    () => {
+      clearTimeout(scrollT);
+      scrollT = setTimeout(() => {
+        scrollT = 0;
+        if (hovNext?.isConnected) hover(hovNext);
+        hovNext = null;
+      }, 100);
+    },
+    { passive: true, capture: true },
+  );
 
   // a selection belongs to a host: a story frame, an appendix file or a full-diff hunk
-  const HOST = "figure.frame, details.file-item, .fd-hunk";
+  const HOST = "figure.frame, details.file-item, .fd-file";
   const hostRows = (host) => $$(".code.u .row", host).filter((r) => r.closest(HOST) === host);
   let sel = { host: null, rows: [], side: null };
   let anchor = null;
@@ -1123,7 +1649,8 @@
   const onSide = (r, side) => (side === "L" ? !!r.dataset.o : side === "R" ? !!r.dataset.n : true);
   function runs(host, rows, side) {
     const all = hostRows(host).filter((r) => onSide(r, side));
-    const idx = rows.filter((r) => onSide(r, side)).map((r) => all.indexOf(r)).sort((a, b) => a - b);
+    const place = new Map(all.map((r, i) => [r, i]));
+    const idx = rows.filter((r) => onSide(r, side)).map((r) => place.get(r)).sort((a, b) => a - b);
     const out = [];
     for (const i of idx) {
       const last = out[out.length - 1];
@@ -1133,7 +1660,8 @@
     return out.map(([a, b]) => lineKey(all[a], side) + (b > a ? `-${lineKey(all[b], side)}` : "")).join(",");
   }
   function select(host, rows, { scroll = false, hash = true, side = null } = {}) {
-    if (host) rows = hostRows(host).filter((r) => rows.includes(r) && (!inSplit(r) || onSide(r, side)));
+    const picked = new Set(rows);
+    if (host) rows = hostRows(host).filter((r) => picked.has(r) && (!inSplit(r) || onSide(r, side)));
     sel = { host, rows, side };
     paintRows();
     if (hash)
@@ -1145,14 +1673,22 @@
       requestAnimationFrame(() => shown(rows[0], side).scrollIntoView({ behavior: smooth(), block: "center" }));
     }
   }
-  function readHash() {
+  async function readHash() {
     const m = /^#(.+?)-([LR]\d+(?:-[LR]\d+)?(?:,[LR]\d+(?:-[LR]\d+)?)*)$/.exec(decodeURIComponent(location.hash));
     if (!m) return;
-    const host = document.getElementById(m[1]);
-    if (!host || !host.matches(HOST)) return;
-    if (files.contains(host)) openFiles(null, host);
-    const rows = hostRows(host);
+    // a full-diff link made before files became one host names a hunk inside it
+    const host = document.getElementById(m[1])?.closest(HOST);
+    if (!host) return;
+    if (files.contains(host)) await openFiles(null, host);
+    else await fillIn(host);
+    let rows = hostRows(host);
     const find = (k) => rows.findIndex((r) => (k[0] === "L" ? r.dataset.o : r.dataset.n) === k.slice(1));
+    for (const part of m[2].split(",")) {
+      const ends = part.split("-");
+      if (ends.every((k) => find(k) >= 0)) continue;
+      await expose(host, ends);
+      rows = hostRows(host);
+    }
     const keys = m[2].split(/[,-]/);
     const picked = [];
     for (const part of m[2].split(",")) {
@@ -1198,11 +1734,11 @@
     why.title = `Show ${label} of ${frame?.dataset.path || "the code"}`;
   }
   let hoverAtt = new Set();
-  function onHoverLinks(e) {
+  function onHoverLinks(el) {
     const next = new Set();
-    const att = e.target.closest(".attach");
+    const att = el.closest(".attach");
     if (att) next.add(att);
-    const line = !att && e.target.closest(".row, .half");
+    const line = !att && el.closest(".row, .half");
     const r = line && rowOf(line);
     if (r && r._att) r._att.forEach((a) => next.add(a));
     if (next.size === hoverAtt.size && [...next].every((a) => hoverAtt.has(a))) return;
@@ -1267,7 +1803,7 @@
       drawing.height = sb.height;
       for (const att of $$(".attach[data-to]", step)) {
         const frame = document.getElementById(att.dataset.to);
-        if (att.hidden || !frame) continue;
+        if (att.hidden || !frame || frame.classList.contains("collapsed")) continue;
         const fb = frame.getBoundingClientRect();
         const wb = $(".why", att).getBoundingClientRect();
         const y2 = wb.top + 10 - sb.top;
@@ -1297,7 +1833,14 @@
     paintRows();
   }
   addEventListener("resize", queueWires);
-  document.addEventListener("toggle", queueWires, true);
+  document.addEventListener(
+    "toggle",
+    (e) => {
+      if (e.target.open) fillIn(e.target);
+      queueWires();
+    },
+    true,
+  );
   if ("ResizeObserver" in window)
     new ResizeObserver(() => {
       queueWires();
@@ -1380,12 +1923,20 @@
 
   document.addEventListener("click", (e) => {
     if (!pop.hidden && !e.target.closest('#trace-pop, [data-act="trace-menu"]')) setPop(false);
+    // a click outside the definition panel closes it, and does nothing else unless it lands on a control
+    if (!defEl.hidden && help.hidden && !e.target.closest("#def, [data-d]") && !String(getSelection()).length) {
+      closeDef();
+      if (!e.target.closest("a, button, summary, [data-act]")) return;
+    }
     const t = e.target.closest("[data-act]");
     if (t) {
       const f = t.closest("figure.frame");
       switch (t.dataset.act) {
         case "reviewed":
           toggleReviewed(f);
+          break;
+        case "frame-toggle":
+          setFrame(f, !f.classList.contains("collapsed"));
           break;
         case "view":
           setView(t.dataset.view);
@@ -1407,7 +1958,9 @@
         case "fd-all": {
           const all = $$(".fd-file", files);
           const collapse = all.some((x) => !x.classList.contains("collapsed"));
-          all.forEach((x) => setFdFile(x, collapse));
+          all.forEach((x) => setFdFile(x, collapse, false));
+          syncFdAll();
+          fdFill();
           break;
         }
         case "trace-menu":
@@ -1441,6 +1994,25 @@
           setBranch(br, !br.classList.contains("open"));
           break;
         }
+        case "unfold": {
+          const g = t.closest(".gap");
+          unfold(g._u || g, t.dataset.x, e.shiftKey);
+          break;
+        }
+        case "refold":
+          // inside a <summary> the click would also toggle the file
+          e.preventDefault();
+          refold(t.closest(HOST));
+          break;
+        case "def-close":
+          closeDef();
+          break;
+        case "def-prev":
+        case "def-next": {
+          const n = defNow.ids.length;
+          showDef(defNow.ids, (defNow.k + (t.dataset.act === "def-next" ? 1 : n - 1)) % n);
+          break;
+        }
         case "branch-close": {
           const br = t.closest(".branch-wrap");
           const fork = forkOf(br);
@@ -1462,6 +2034,12 @@
       stepTrace(1);
       return;
     }
+    // a header folds its frame; its path and counts stay selectable text
+    const fh = e.target.closest("figure.frame > .fh");
+    if (fh && $(".fh-tog", fh) && !e.target.closest(".path, .stat, a, button")) {
+      setFrame(fh.parentElement, !fh.parentElement.classList.contains("collapsed"));
+      return;
+    }
     const head = e.target.closest(".fd-head");
     if (head && !e.target.closest(".path, .stat, a, button")) {
       const file = head.closest(".fd-file");
@@ -1481,7 +2059,7 @@
       const el = document.getElementById(nav.dataset.fd);
       if (el) {
         setFdFile(el, false);
-        scrollFd(el);
+        fillIn(el).then(() => scrollFd(el));
       }
       return;
     }
@@ -1492,6 +2070,13 @@
     }
     if (e.target.closest(".ghjump")) return;
     const tr = e.target.closest(".tr");
+    const named = e.target.closest("[data-d]");
+    // a name that leads to its definition and also starts a trace: the click opens, alt-click traces
+    if (named && !(e.altKey && tr && traceable(tr)) && !String(getSelection()).length) {
+      // a hop inside the panel keeps it where it is
+      showDef(named.dataset.d.split(" "), 0, named.closest("#def") ? null : { x: e.clientX, y: e.clientY });
+      return;
+    }
     if (tr && traceable(tr)) {
       setTrace(tr.dataset.tr === traceOn ? null : tr.dataset.tr, tr);
       return;
@@ -1538,6 +2123,7 @@
     const k = e.key;
     if (k === "Escape") {
       if (!help.hidden) setHelp(false);
+      else if (!defEl.hidden) closeDef();
       else if (!files.hidden) closeFiles();
       else if (!pop.hidden) setPop(false);
       else if (traceOn) setTrace(null);
@@ -1589,7 +2175,7 @@
     const s = getSelection();
     const at = s.rangeCount && s.getRangeAt(0).commonAncestorContainer;
     const el = at && (at.nodeType === 1 ? at : at.parentElement);
-    if (!el || !el.closest("main, #files") || !(el.closest(".code") || el.querySelector(".code"))) return;
+    if (!el || !el.closest("main, #files, #def") || !(el.closest(".code") || el.querySelector(".code"))) return;
     const text = s.toString().replace(/^\u00a0+/gm, (m) => " ".repeat(m.length)).replace(/^ $/gm, "");
     e.clipboardData.setData("text/plain", text);
     e.preventDefault();
@@ -1615,14 +2201,21 @@
   // ---------- init ----------
 
   pill.inert = true;
+  for (const u of $$(".code.u[data-src]")) {
+    if (u.querySelector(":scope > [data-len]")) u._lazy = true;
+    else setup(u);
+  }
   applySide();
   fitHdr();
   applyView();
   applyNotes();
   refreshReviewed();
+  for (const f of diffFrames) if (isReviewed(f)) setFrame(f, true, false);
   syncFdAll();
   spy();
   updateMap();
+  // labels rewrap and branches come and go: the fill is a share of the list's height
+  if ("ResizeObserver" in window && $("ol", map)) new ResizeObserver(placeFill).observe($("ol", map));
   readHash();
   if (document.fonts) document.fonts.ready.then(queueWires);
   addEventListener("load", queueWires);

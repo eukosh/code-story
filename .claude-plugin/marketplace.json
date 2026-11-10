@@ -1,0 +1,11 @@
+{
+  "name": "code-story",
+  "owner": { "name": "eukosh", "url": "https://github.com/eukosh" },
+  "plugins": [
+    {
+      "name": "code-story",
+      "source": "./",
+      "description": "Turn a code change into a scroll-driven HTML review story, read in the order the code runs, with every line of code rendered from git."
+    }
+  ]
+}
