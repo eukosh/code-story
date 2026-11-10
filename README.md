@@ -2,6 +2,8 @@
 
 An [Agent Skills](https://agentskills.io) skill that turns a code change into a scroll-driven HTML page you read in the order the code runs: a request arrives, a middleware checks it, a record gets written. Each stop shows the real code, rendered from git.
 
+![A code story of a small change: related code sits beside the line it supports, a name opens its definition, the diff splits, a frame folds when reviewed, a failure path opens in place, a file unfolds, a dbt ref opens its model, a value is traced from the report back to the request, and the full diff opens](docs/demo.webp)
+
 The agent writes the narrative. It never types code into the page: every line comes from git through a script, and the build fails until every change in the diff is shown somewhere.
 
 It makes two kinds of story:
