@@ -228,8 +228,8 @@ class FileDiff:
         )
 
 
-def digest(s: str) -> str:
-    return hashlib.sha1(s.encode()).hexdigest()[:8]
+def digest(s: str, n: int = 8) -> str:
+    return hashlib.sha1(s.encode()).hexdigest()[:n]
 
 
 HUNK_RE = re.compile(r"@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@ ?(.*)$")
@@ -608,7 +608,7 @@ def ignored(g: Git, path: Path) -> bool:
 
 def pr_meta(repo: Path, url: str) -> dict:
     p = subprocess.run(
-        ["gh", "pr", "view", url, "--json", "number,title,body,url,baseRefName,baseRefOid,headRefName,headRefOid"],
+        ["gh", "pr", "view", url, "--json", "number,title,body,url,baseRefName,baseRefOid,headRefName,headRefOid,isCrossRepository,headRepositoryOwner"],
         capture_output=True,
         cwd=repo,
     )
@@ -720,7 +720,10 @@ def cmd_index(a: argparse.Namespace) -> None:
         "repo": str(repo),
         "owner": owner if remote else None,
         "name": name,
-        "pr": {k: pr[k] for k in ("number", "title", "body", "url", "baseRefName", "headRefName")} if pr else None,
+        "pr": {
+            **{k: pr[k] for k in ("number", "title", "body", "url", "baseRefName", "headRefName")},
+            "headOwner": (pr.get("headRepositoryOwner") or {}).get("login") if pr.get("isCrossRepository") else None,
+        } if pr else None,
         "base_ref": base_ref,
         "base": base,
         "merge_base": mb,
@@ -1144,9 +1147,9 @@ def url_attr(name: str, url: str | None) -> str:
     return f' {name}="{esc(url)}"' if url else ""
 
 
-def rows_hash(rows: list[Row]) -> str:
+def rows_hash(rows: list[Row], n: int = 8) -> str:
     # rows start with " ", "-" or "+", so the marker line can't be mistaken for one
-    return digest("".join(f"{r.kind}{r.text}\n" + ("\\ No newline\n" if r.nonl else "") for r in rows))
+    return digest("".join(f"{r.kind}{r.text}\n" + ("\\ No newline\n" if r.nonl else "") for r in rows), n)
 
 
 def esc(s: str) -> str:
@@ -1255,9 +1258,11 @@ class Def:
     line: int  # the line that names it
     a: int  # what a reader opens: from the decorators and comments above it to the end of its body
     b: int
-    kind: str = "func"  # func, class, const, model, macro
+    kind: str = "func"  # func, class, const, field, model, macro
     nested: bool = False  # a method, or a function inside another: no other file calls it by its bare name
     inner: bool = False  # nested in a function, not in a class: nothing reaches it through a dot either
+    owner: str = ""  # a field's class
+    scope: tuple[int, int] = (0, 0)  # a field's class, its lines
 
 
 def indent(line: str) -> int:
@@ -1304,12 +1309,15 @@ def holds(path: str, module: str) -> bool:
     return "/" + stem == module if module.startswith("/") else ("/" + stem).endswith("/" + module)
 
 
-def imports(sig: list, family: str, path: str) -> tuple[dict[str, tuple[str, str]], dict[int, str], set[int]]:
+def imports(sig: list, family: str, path: str) -> tuple[dict[str, tuple[str, str]], dict[int, str], set[int], dict[str, list[str]]]:
     """What a file's import lines say: for each name they bring in, its module and what it is called there;
-    the module of each name written on an import line (by its place in sig); and the places of the aliases."""
+    the module of each name written on an import line (by its place in sig); the places of the aliases; and the
+    names a Python `import x`, `import x.y` or `import x as y` binds to a module, each with the modules it was
+    bound for."""
     origin: dict[str, tuple[str, str]] = {}
     at: dict[int, str] = {}
     alias: set[int] = set()
+    modules: dict[str, list[str]] = {}
     here = posixpath.dirname(path)
 
     def beside(rel: str) -> str:
@@ -1345,6 +1353,21 @@ def imports(sig: list, family: str, path: str) -> tuple[dict[str, tuple[str, str
                 module = dotted.lstrip(".").replace(".", "/")
                 up = len(dotted) - len(dotted.lstrip("."))
                 bind(names, beside("../" * (up - 1) + module) if up else module)
+        elif family == "py" and cls == "kn" and text == "import":
+            bound, dotted, alias_next = "", "", False  # each part binds its first name, or what follows its `as`
+            while j < len(sig) and sig[j][0] == n and (sig[j][2] == "nn" or sig[j][3] in (",", "as")):
+                t = sig[j][3]
+                if t == ",":
+                    modules.setdefault(bound, []).append(dotted.replace(".", "/"))
+                    bound = dotted = ""
+                elif t == "as":
+                    alias_next = True
+                elif alias_next:
+                    bound, alias_next = t, False
+                else:
+                    bound, dotted = bound or t, dotted + t
+                j += 1
+            modules.setdefault(bound, []).append(dotted.replace(".", "/"))
         elif family == "js" and cls.startswith("k") and text in ("import", "export"):
             while j < len(sig) and (sig[j][2] in NAMES or sig[j][3] in ("{", "}", ",", "*", "as", "type")):
                 names += [j] if sig[j][2] in NAMES else []
@@ -1353,7 +1376,7 @@ def imports(sig: list, family: str, path: str) -> tuple[dict[str, tuple[str, str
                 module = re.sub(r"\.[cm]?[jt]sx?$", "", sig[j + 1][3].strip("'\"`"))
                 bind(names, beside(module) if module.startswith(".") else re.sub(r"^[@~]/", "", module))
         i = j
-    return origin, at, alias
+    return origin, at, alias, modules
 
 
 class Dbt:
@@ -1441,7 +1464,7 @@ class Defs:
         self.names: dict[tuple[str, str], list[Def]] = {}
         self.sites: set[tuple[str, int, int]] = set()
         self.sigs: dict[str, list[tuple[int, int, str, str]]] = {}
-        self.imports: dict[str, tuple[dict[str, tuple[str, str]], dict[int, str], set[int]]] = {}
+        self.imports: dict[str, tuple[dict[str, tuple[str, str]], dict[int, str], set[int], set[str]]] = {}
         self.file_links = cache(self._file_links)
         self.test = cache(lambda path: any(glob_match(path, p) for p in DEFAULT_EXCLUDES["tests"]))
         for path in shown:
@@ -1515,6 +1538,8 @@ class Defs:
                     rest = line[closes(line, m + 1) + 1 :]
                     if rest and rest[-1][3] == "{" and not any(t[3] in ("(", ")", "=>") for t in rest):
                         found.setdefault(i + m, ("func", True))
+        if family == "py":
+            self.fields(path, raw, sig, first, nest, found)
         seen = set()
         around: list[tuple[int, int, str]] = []  # the definitions this one sits in: depth, last line, kind
         for i, (kind, method) in sorted(found.items()):
@@ -1533,10 +1558,70 @@ class Defs:
                 Def(path, n, a, b, kind, method or depth > 0, depth > 0 and not method and home != "class")
             )
 
+    def fields(self, path: str, raw: list[str], sig: list, first: dict[int, int], nest: dict[int, int], found: dict) -> None:
+        """Python class-body fields (`NAME: T = v`, `NAME = v`, `name: T`): dataclass and pydantic fields, enum
+        members, class constants. Only lines at the class body's own indentation and outside any bracket."""
+        for i, (kind, _) in list(found.items()):
+            if kind != "class":
+                continue
+            n, cls_name = sig[i][0], sig[i][3]
+            _, b = extent(raw, n)
+            lines = [m for m in range(n + 1, b + 1) if m in first]
+            if not lines:
+                continue
+            body = sig[first[lines[0]]][1]
+            seen = set()
+            for m in lines:
+                k = first[m]
+                t = sig[k]
+                if t[1] != body or t[2] != "n" or nest[m] > 0 or k + 1 >= len(sig) or sig[k + 1][0] != m:
+                    continue
+                if sig[k + 1][3] not in ("=", ":") or t[3] in seen:
+                    continue
+                seen.add(t[3])
+                self.sites.add((path, m, t[1]))
+                a, z = extent(raw, m)
+                self.names.setdefault(("py", t[3]), []).append(
+                    Def(path, m, a, z, "field", True, False, cls_name, (n, b))
+                )
+
+    def has(self, module: str) -> bool:
+        """Whether a file of the page is the module an import names."""
+        return any(holds(p, module) for p in self.open)
+
     def code_links(self, path: str, family: str) -> dict[int, list]:
         out: dict[int, list] = {}
         sig = self.sigs[path]
-        origin, imported, alias = self.imports[path]
+        origin, imported, alias, modules = self.imports[path]
+        # each line's indentation, first word and where it starts in sig; a line a string starts or runs
+        # through is as deep as can be, so a docstring's text at the margin never ends the function around it
+        lead: dict[int, tuple[int, str, int]] = {}
+        for k, t in enumerate(sig):
+            lead.setdefault(t[0], (10**6 if t[2].startswith("s") else t[1], t[3], k))
+
+        def in_function(i: int, top: int) -> bool:
+            """Whether the name at sig[i], in the class that starts at line top, sits in a function and not in
+            the class's own body."""
+            n = sig[i][0]
+            depth, word, k = lead[n]
+            if word in ("def", "async"):  # a one-line method: its body follows the colon outside every bracket
+                nest = 0
+                for t in sig[k:i]:
+                    if t[2] not in ("p", "o"):  # a bracket in a string opens nothing
+                        continue
+                    nest += sum(map(t[3].count, "([{")) - sum(map(t[3].count, ")]}"))
+                    if t[3] == ":" and nest == 0:
+                        return True
+            closing = False
+            for m in range(n - 1, top, -1):
+                col, word, _ = lead.get(m, (10**6, "", 0))
+                # a line that closes a bracket belongs to the line that opened it: `):` under its `def`
+                if col < depth or (closing and col == depth):
+                    depth, closing = col, word in (")", "]", "}")
+                    if word in ("def", "async"):
+                        return True
+            return False
+
         for i, (n, col, cls, name) in enumerate(sig):
             if cls == "nd" and name.startswith("@"):  # a decorator's token takes its @ along
                 col, name, cls = col + 1, name[1:], "n"
@@ -1556,9 +1641,13 @@ class Defs:
             module, found = None, local
             if i in imported:
                 module = imported[i]
-            elif not dot and name in origin and not any(d.path == path for d in local):
-                module, real = origin[name]
-                found = self.names.get((family, real), ())
+            elif not dot and name in origin:
+                here = [d for d in local if d.path == path]
+                if any(d.kind == "field" and d.scope[0] < n <= d.scope[1] and not in_function(i, d.scope[0]) for d in here):
+                    continue  # in its class's own body the name may be the field or the import
+                if all(d.kind == "field" for d in here):  # a function reads the import, never the field
+                    module, real = origin[name]
+                    found = self.names.get((family, real), ())
 
             def leads(d: Def) -> bool:
                 same = d.path == path
@@ -1568,6 +1657,41 @@ class Defs:
                     return False  # written inside itself: super().load(), or a wrapper calling what it wraps
                 if module is not None:
                     return not d.nested and holds(d.path, module)
+                if d.kind == "field":
+                    # read through self inside its class, or through its class; any other receiver only for an
+                    # UPPER_CASE name that one class on the page has
+                    if not dot:
+                        return False
+                    if owner in ("self", "cls") and same and d.scope[0] < n <= d.scope[1]:
+                        return True
+                    # never through a receiver that names something else: a module, a name imported from a file
+                    # the page doesn't have, or a class imported from another file than the field's
+                    recv = root = sig[i - 2][3] if i > 1 else ""
+                    k = i - 2
+                    while k > 1 and sig[k - 1][3] == "." and sig[k - 2][3].isidentifier() and sig[k - 2][0] == n:
+                        k -= 2
+                        root = sig[k][3]
+                    def foreign(r: str, through: bool = False) -> bool:
+                        # through: r only leads to the receiver, so it may be the module that is the field's file
+                        if r in modules:
+                            return not (through and any(holds(d.path, m) for m in modules[r]))
+                        if r not in origin:
+                            return False
+                        module, real = origin[r]
+                        return not (self.has(module) or (through and holds(d.path, f"{module.rstrip('/')}/{real}")))
+
+                    if root != recv:  # an attribute, whatever the file imports under its name
+                        if owner == simple(d.owner):  # models.Config.DEBUG, not external.Config.DEBUG
+                            return not foreign(root, True)
+                    elif foreign(recv) or (recv[:1].isupper() and recv in origin and not holds(d.path, origin[recv][0])):
+                        return False
+                    elif owner == simple(d.owner):
+                        return True
+                    # nor, for any other receiver, through another class or a chain that starts at something
+                    # foreign (HTTPStatus.NOT_FOUND, signal.SIGTERM, http.client.HTTP_PORT)
+                    if recv[:1].isupper() or foreign(recv) or foreign(root):
+                        return False
+                    return name.isupper() and COMPOUND.search(name) is not None and len(found) == 1
                 telling = COMPOUND.search(name) or name.isupper() or (d.kind == "class" and name[0].isupper())
                 if not dot:
                     return bool(telling or call) and (same or not d.nested)
@@ -1698,10 +1822,12 @@ class Renderer:
             return []
         out = []
         self.trace_names = {}
+        self.trace_alts = {}
         for name, alts in traces.items():
             alts = [alts] if isinstance(alts, str) else list(alts or [])
             if alts:
                 self.trace_names[slug(str(name))] = str(name)
+                self.trace_alts[slug(str(name))] = list(map(str, alts))
                 out.append((slug(str(name)), re.compile(r"(?<![\w-])(" + "|".join(map(re.escape, map(str, alts))) + r")(?![\w-])")))
         return out
 
@@ -1811,12 +1937,19 @@ class Renderer:
         toks = self.ix.src.lines(sha, path)[n - 1]
         return self.code(toks if "".join(t for _, t in toks) == text else [("", text)], text, links=self.def_links(sha, path, n))
 
-    def row_html(self, path: str, r: Row) -> str:
+    def row_html(self, path: str, r: Row, h: Hunk | None = None, i: int = 0) -> str:
+        """h: the row is h.rows[i] and sits in a story frame, so it carries where it is in its file's diff, which
+        tells twins apart for reviewed marks (D44)."""
+        key = "" if h is None else f' data-i="{self.row_index(h) + i}"'
         return (
-            f'<div class="row {KIND[r.kind]}" data-o="{r.old or ""}" data-n="{r.new or ""}">'
+            f'<div class="row {KIND[r.kind]}" data-o="{r.old or ""}" data-n="{r.new or ""}"{key}>'
             f'<span class="ln">{r.old or ""}</span><span class="ln">{r.new or ""}</span>'
             f'<span class="sg">{SIGN[r.kind]}</span>{self.row_code(path, r)}</div>'
         )
+
+    def row_index(self, h: Hunk) -> int:
+        """Where h's first row is in its file's diff, counting rows."""
+        return sum(len(x.rows) for x in self.ix.file(h.path).hunks if x.n < h.n)
 
     # ---- sources: each file once, for the page to unfold or fill in ----
 
@@ -2050,7 +2183,7 @@ class Renderer:
             else:
                 first_at = at
             last = h
-            parts.extend(self.row_html(h.path, r) for r in rows)
+            parts.extend(self.row_html(h.path, r, h, at - seq.start(h) + i) for i, r in enumerate(rows))
             adds += sum(r.kind == "+" for r in rows)
             dels += sum(r.kind == "-" for r in rows)
             news += [r.new for r in rows if r.new]
@@ -2066,7 +2199,7 @@ class Renderer:
             stamp = self.stamp(self.idx["merge_base"], self.old_paths.get(path, path), min(olds or [1]), max(olds or [1]), False)
         return self.frame_html(
             fid, "diff", path, label, stat_html(adds, dels), stamp, "".join(parts), [h.id for h in hs],
-            url_attr("data-gh", self.gh_diff(path)), self.fd_hunk[hs[0].id], rows_hash(shown), f.meta if f else None,
+            url_attr("data-gh", self.gh_diff(path)), self.fd_hunk[hs[0].id], rows_hash(shown, 20), f.meta if f else None,
             self.src_attr(seq, first_at),
         )
 
@@ -2097,7 +2230,15 @@ class Renderer:
         label = it.kw.get("label") or f"{len(it.args) - 1} more sites, same change"
         details = f'<details class="ripple"><summary>{esc(label)}</summary>{"".join(inner)}</details>'
         self.last_fid = fid
-        first = re.sub(r'data-hash="(\w+)"', lambda m: f'data-hash="{digest(m[1] + "".join(self.hunks[x].path + self.hunks[x].hash for x in it.args[1:]))}"', first, count=1)
+        sites = [self.hunks[x] for x in it.args[1:]]
+
+        def rehash(m: re.Match) -> str:
+            now = digest(m[1] + "".join(h.path + rows_hash(h.rows, 20) for h in sites), 20)
+            # main's 8-character hash rides along, so a legacy mark still carries over
+            was = digest(m[1][:8] + "".join(h.path + h.hash for h in sites))
+            return f'data-hash="{now}" data-was="{was}"'
+
+        first = re.sub(r'data-hash="(\w+)"', rehash, first, count=1)
         return first[: -len("</figure>")] + details + "</figure>"
 
     def d_ctx(self, it: Item) -> str:
@@ -2755,6 +2896,22 @@ def page_header(idx: dict, story_title: str) -> tuple[str, str, str, str]:
 ACCEPT_AGAIN = "--accept applies to a build that succeeds; pass it again once the errors above are fixed"
 
 
+def marks_scope(ix: Indexed) -> str:
+    """Whose reviewed marks a page reads (D44): one change, so a PR, its branch and its working tree share them
+    and two PRs never do. Without a branch, the head commit."""
+    idx = ix.idx
+    repo = f"{idx['owner']}/{idx['name']}" if idx["owner"] else f"local/{idx['name']}@{digest(idx['repo'])}"
+    pr = idx["pr"]
+    if pr:
+        branch = f"{pr['headOwner']}:{pr['headRefName']}" if pr.get("headOwner") else pr["headRefName"]
+    else:
+        branch = idx["branch"]
+        if not branch and idx["head_ref"] not in ("HEAD", WORKTREE):
+            ref = (ix.g.try_run("rev-parse", "--symbolic-full-name", idx["head_ref"]) or "").strip()
+            branch = re.sub(r"^refs/(heads/|remotes/[^/]+/)", "", ref) if ref.startswith(("refs/heads/", "refs/remotes/")) else ""
+    return f"{repo}:{branch}" if branch else f"{repo}@{(idx['head_commit'] or idx['head'])[:12]}"
+
+
 def cmd_build(a: argparse.Namespace, write: bool = True) -> None:
     try:
         build(a, write)
@@ -2809,17 +2966,18 @@ def build(a: argparse.Namespace, write: bool) -> None:
     title, hdr, refs, refs_title = page_header(idx, r.title)
     m = front.get("map") or {}
     map_title = esc(str(m.get("title") or "Story")) + (f"<span>{esc(str(m['subtitle']))}</span>" if m.get("subtitle") else "")
-    # stable across pushes, so reader settings survive; reviewed marks are keyed by frame content instead
-    story_id = f"{idx['owner'] or 'local'}/{idx['name']}" + (
-        f"#{idx['pr']['number']}" if idx["pr"] else ":tour" if idx.get("tour") else f":{idx['branch'] or idx['head_ref']}"
-    )
+    # stable across pushes, so reader settings survive
+    story = f"#{idx['pr']['number']}" if idx["pr"] else ":tour" if idx.get("tour") else f":{idx['branch'] or idx['head_ref']}"
+    story_id = f"{idx['owner'] or 'local'}/{idx['name']}{story}"
     values = {
         "page_title": esc(str(front.get("title") or title)),
         "css": (ASSETS / "story.css").read_text() + "\n" + syntax_themes_css(),
         "js": (ASSETS / "story.js").read_text(),
         "story_id": esc(story_id),
+        "marks_id": esc(marks_scope(ix)),
         "mode": "tour" if idx.get("tour") else "change",
         "traces_json": esc(json.dumps(r.trace_names)),
+        "trace_ids_json": esc(json.dumps(r.trace_alts)),
         "syn_json": esc(json.dumps(SYNTAX_THEMES)),
         "syn_default": SYNTAX_DEFAULT,
         "hdr_title": hdr,

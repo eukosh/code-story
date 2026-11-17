@@ -22,6 +22,18 @@ def links(repo):
     ]
 
 
+def links_in(repo, path):
+    """The linked names in the frames that show `path`."""
+    page = repo.read("story.html")
+    main = page[page.index("<main") : page.index("</main>")]
+    shown = "".join(m[0] for m in re.finditer(rf'<(figure|details)[^>]*data-path="{re.escape(path)}".*?</\1>', main, re.S))
+    defs = manifest(repo)
+    return [
+        (html.unescape(m[2]), [tuple(defs[int(i)][3:]) for i in m[1].split()])
+        for m in re.finditer(r'<span[^>]*data-d="([\d ]+)"[^>]*>([^<]*)</span>', shown)
+    ]
+
+
 def opened(repo, path, line):
     """The rows a click on a name defined at path:line puts in the panel."""
     src, at, n = next(d[:3] for d in manifest(repo) if d[3:] == [path, line])
@@ -58,6 +70,11 @@ def test_a_call_opens_the_function_it_names(repo):
     assert opened(repo, "src/cache.py", 6) == [
         "# how rows are read", "@cached", "def load_rows(path):", "    rows = [path]", "    return rows",
     ]
+
+
+def test_a_keyword_or_an_assignment_is_not_a_use(repo):
+    story(repo, {"src/cache.py": CACHE, "app.py": "from src.cache import load_rows\n\nrun(load_rows=1)\nload_rows = 2\n"})
+    assert links(repo) == [("load_rows", [("src/cache.py", 6)])]
 
 
 def test_a_definition_opens_from_its_diff_with_the_removed_lines_in_place(repo):
@@ -364,3 +381,202 @@ def test_what_the_story_shows_is_packed_before_what_only_the_full_diff_does(repo
     out = repo.build().stdout
     assert links(repo) == [("'big_1'", [("models/big_1.sql", 1)])]
     assert out.rstrip().split("open nothing: ")[1].split("\n")[0] == "big_6"
+
+
+ENV = """\
+from enum import Enum
+
+
+class EnvModel(Base):
+    # how much one query may scan
+    PROCESSING_LIMIT_GB: int = 20
+    DEBUG = False
+    region: str
+    user_id: str = ""
+    LIMITS = {
+        "a": 1,
+    }
+
+    def check(self):
+        local_value: int = 3
+        return self.region, self.user_id, local_value
+
+
+class Color(Enum):
+    RED = 1
+    GREEN = 2
+"""
+
+
+def test_a_class_body_field_opens_its_line(repo):
+    story(repo, {
+        "src/env.py": ENV,
+        "app.py": (
+            "if gb > self.env.PROCESSING_LIMIT_GB:\n"  # an UPPER_CASE field, one class has it
+            "    x = EnvModel.DEBUG\n"  # through its class
+            "    y = Color.RED\n"  # an enum member
+            "    z = EnvModel.LIMITS\n"
+        ),
+    })
+    assert links(repo) == [
+        ("region", [("src/env.py", 8)]),  # self., inside the class
+        ("user_id", [("src/env.py", 9)]),
+        ("PROCESSING_LIMIT_GB", [("src/env.py", 6)]),
+        ("EnvModel", [("src/env.py", 4)]),
+        ("DEBUG", [("src/env.py", 7)]),
+        ("Color", [("src/env.py", 19)]),
+        ("RED", [("src/env.py", 20)]),
+        ("EnvModel", [("src/env.py", 4)]),
+        ("LIMITS", [("src/env.py", 10)]),
+    ]
+    assert opened(repo, "src/env.py", 6) == ["    # how much one query may scan", "    PROCESSING_LIMIT_GB: int = 20"]
+    assert opened(repo, "src/env.py", 10) == ["    LIMITS = {", '        "a": 1,', "    }"]
+
+
+def test_a_field_links_only_through_its_class_self_or_a_telling_name(repo):
+    story(repo, {
+        "src/env.py": ENV,
+        "app.py": (
+            "a = request.user_id\n"  # some other object's user_id
+            "b = settings.DEBUG\n"  # one word: could be any class's
+            "c = PROCESSING_LIMIT_GB\n"  # bare: not this field
+            "d = EnvModel(PROCESSING_LIMIT_GB=3)\n"  # a keyword argument
+            "e = self.region\n"  # self outside the class
+            "f = obj.local_value\n"  # a local in a method is no field
+            "g = obj.LIMITS\n"
+        ),
+    })
+    assert links_in(repo, "app.py") == [("EnvModel", [("src/env.py", 4)])]
+
+
+def test_an_upper_case_field_never_links_through_a_receiver_that_names_something_else(repo):
+    errors = "from enum import Enum\n\n\nclass ErrorCode(Enum):\n    NOT_FOUND = 1\n    BAD_REQUEST = 2\n    AF_INET = 3\n    SIG_TERM = 4\n    LOG_LEVEL = 5\n"
+    story(repo, {
+        "src/errors.py": errors,
+        "app.py": (
+            "import signal\n"
+            "import os.path, socket as net\n"
+            "from http import HTTPStatus\n"
+            "from logging import handlers\n"
+            "\n"
+            "a = HTTPStatus.NOT_FOUND\n"  # another class
+            "b = Other.BAD_REQUEST\n"  # a class the page doesn't have
+            "c = net.AF_INET\n"  # a module, by its alias
+            "d = signal.SIG_TERM\n"  # a module
+            "e = handlers.LOG_LEVEL\n"  # imported from a file the page doesn't have
+            "f = os.NOT_FOUND\n"
+            "g = self.codes.BAD_REQUEST\n"  # an attribute: still the one class that has it
+        ),
+    })
+    assert links_in(repo, "app.py") == [("BAD_REQUEST", [("src/errors.py", 6)])]
+
+
+def test_an_upper_case_field_never_links_through_a_chain_that_starts_at_a_module(repo):
+    """`import http.client` binds `http`: http.client.HTTP_PORT is the standard library's, not the page's."""
+    story(repo, {
+        "src/ports.py": "class Ports:\n    HTTP_PORT = 80\n    MAX_LINE = 1\n    MAX_ROWS = 2\n",
+        "app.py": (
+            "import http.client\n"
+            "import xml.etree.ElementTree\n"
+            "from logging import handlers\n"
+            "\n"
+            "a = http.client.HTTP_PORT\n"
+            "b = xml.etree.MAX_LINE\n"
+            "c = handlers.x.MAX_ROWS\n"
+            "d = self.ports.MAX_ROWS\n"  # a chain from self: still the one class that has it
+        ),
+    })
+    assert links_in(repo, "app.py") == [("MAX_ROWS", [("src/ports.py", 4)])]
+
+
+def test_a_field_two_classes_have_needs_its_class_to_link(repo):
+    other = "class Other:\n    PROCESSING_LIMIT_GB: int = 5\n"
+    story(repo, {
+        "src/env.py": ENV,
+        "src/other.py": other,
+        "app.py": "a = self.env.PROCESSING_LIMIT_GB\nb = Other.PROCESSING_LIMIT_GB\n",
+    })
+    assert [x for x in links(repo) if x[0] == "PROCESSING_LIMIT_GB"] == [("PROCESSING_LIMIT_GB", [("src/other.py", 2)])]
+
+
+def test_a_variable_named_like_the_class_reaches_its_fields(repo):
+    story(repo, {"src/env.py": ENV, "app.py": "a = env_model.user_id\nb = model.user_id\n"})
+    assert [x for x in links(repo) if x[0] == "user_id"][-1:] == [("user_id", [("src/env.py", 9)])]
+    assert sum(1 for x in links(repo) if x[0] == "user_id") == 2  # self.user_id in the class, then env_model's
+
+
+def test_a_field_never_links_through_a_receiver_the_imports_say_is_something_else(repo):
+    story(repo, {
+        "app/models.py": "class Status:\n    ACTIVE = 'a'\n\n\nclass Config:\n    DEBUG = False\n    timeout = 3\n",
+        "app/schemas.py": "class Status:\n    ACTIVE = 'b'\n",
+        "app/svc.py": (
+            "import config\n"
+            "import external\n"
+            "from app.enums import Status\n"  # a file the page doesn't have
+            "\n"
+            "a = Status.ACTIVE\n"
+            "b = config.DEBUG\n"  # a module, not the class named like it
+            "c = config.timeout\n"
+            "d = external.Config.DEBUG\n"  # some other module's Config
+        ),
+        "app/api.py": "from app.schemas import Status\n\ne = Status.ACTIVE\n",  # the class it imported, not its namesake
+        # the class, reached through its own module
+        "app/use.py": (
+            "import app.models as m\n"
+            "from . import models\n"
+            "from external import Config\n"  # not what models.Config is
+            "\n"
+            "f = m.Config.DEBUG\n"
+            "g = models.Config.timeout\n"
+        ),
+    })
+    assert not {"ACTIVE", "DEBUG", "timeout"} & {name for name, _ in links_in(repo, "app/svc.py")}
+    assert links_in(repo, "app/api.py") == [
+        ("Status", [("app/schemas.py", 1)]),
+        ("Status", [("app/schemas.py", 1)]),
+        ("ACTIVE", [("app/schemas.py", 2)]),
+    ]
+    assert [(name, to) for name, to in links_in(repo, "app/use.py") if name != "Config"] == [
+        ("DEBUG", [("app/models.py", 6)]),
+        ("timeout", [("app/models.py", 7)]),
+    ]
+
+
+def test_a_field_does_not_shadow_an_import_of_its_name(repo):
+    story(repo, {
+        "src/log.py": "import logging\n\nlogger = logging.getLogger('x')\n",
+        "src/dates.py": "def date(x):\n    return x\n",
+        "src/tools.py": (
+            "from dataclasses import dataclass\n"
+            "from datetime import date\n"
+            "from src.log import logger\n"
+            "\n\n"
+            "@dataclass\n"
+            "class Tools:\n"
+            "    logger: object\n"
+            "    date: date = date(2020, 1, 1)\n"  # the field or datetime's, never src/dates.py
+            "\n\n"
+            "def run():\n"
+            "    logger.info('x')\n"
+            "    return date(2020, 1, 1)\n"  # datetime's, which the page doesn't have
+            "\n\n"
+            "class Keeper:\n"
+            "    logger = None\n"
+            "    backup = logger\n"  # the class's own
+            "    spare = (\n"
+            "        logger\n"
+            "    )\n"
+            "\n"
+            "    def log(\n"
+            "        self,\n"
+            "    ):\n"
+            '        """Log it.\n'
+            "\n"
+            "  More, less indented.\n"
+            '        """\n'
+            "        logger.info('y')\n"  # the import again
+            "\n"
+            "    def quick(self, log=logger, sep='('): return logger\n"  # the default is the class's, the body the import
+        ),
+    })
+    assert links_in(repo, "src/tools.py") == [("logger", [("src/log.py", 3)])] * 4

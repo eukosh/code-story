@@ -2,7 +2,7 @@
 
 An [Agent Skills](https://agentskills.io) skill that turns a code change into a scroll-driven HTML page you read in the order the code runs: a request arrives, a middleware checks it, a record gets written. Each stop shows the real code, rendered from git.
 
-![A code story of a small change: related code sits beside the line it supports, a name opens its definition, the diff splits, a frame folds when reviewed, a failure path opens in place, a file unfolds, a dbt ref opens its model, a value is traced from the report back to the request, and the full diff opens](docs/demo.webp)
+![A code story of a small change: related code sits beside the line it supports, a name opens its definition, the diff splits, a snippet folds when reviewed, a failure path opens in place, a file unfolds, a dbt ref opens its model, a value is traced from the report back to the request, and the full diff opens](docs/demo.webp)
 
 The agent writes the narrative. It never types code into the page: every line comes from git through a script, and the build fails until every change in the diff is shown somewhere.
 
@@ -15,13 +15,14 @@ It makes two kinds of story:
 
 - A floating map of the chapters that tracks where you are.
 - Unified or split diffs, with word-level highlights on changed lines.
-- Any frame unfolds to show more of its file: 20 lines up or down, everything hidden at that spot, or the whole file.
-- A frame folds to its header with a click, and folds itself when marked reviewed.
-- Click a function, class or constant to open its definition beside the code, when it is defined in a file the page has. In a dbt project, `ref('model')` and macro calls open the model and the macro.
+- Any snippet unfolds to show more of its file: 20 lines up or down, everything hidden at that spot, or the whole file.
+- A snippet folds to its header with a click, and folds itself when marked reviewed.
+- Click a function, class, constant or Python class field to open its definition beside the code, when it is defined in a file the page has. In a dbt project, `ref('model')` and macro calls open the model and the macro.
 - Failure paths that open in place at the point they branch off.
-- Trace: click a value and every frame it passes through lights up.
+- Trace: every snippet a value passes through lights up. A click on a traced name shows the trace in the panel, and its chip starts it; alt-click starts it at once.
 - A full file-by-file diff, with jumps both ways between it and the story.
-- A "reviewed" mark per frame, and GitHub links on lines and frames when the code is on GitHub.
+- A reviewed mark per snippet, shared by the PR, branch and working-tree stories of one change. Identical code at another place in the file needs its own mark. A snippet whose code changed after you marked it reopens with "Changed since review" and a bar beside each line that differs. The hint is a best guess from the rows the mark kept: it misses a line removed at a snippet's very start or end, and it also shows when a story re-cuts unchanged code so a snippet grows past one you marked.
+- GitHub links on lines and snippets when the code is on GitHub.
 - One self-contained HTML file that works offline.
 
 ## Install
@@ -59,7 +60,9 @@ It indexes the change, reads the code it needs, writes `story.md`, builds the pa
 - `skills/code-story/` is the skill itself, and the only part `npx skills` copies: `SKILL.md`, references, the engine (`scripts/codestory.py`) and the page assets.
 - `.claude-plugin/` makes the repo a Claude Code plugin and its own one-plugin marketplace.
 - `docs/design.md` records the design decisions.
-- `tests/` holds the engine's tests: `uv run --with pytest --with pygments --with markdown-it-py --with pyyaml pytest tests -q`
+- `tests/` holds the tests: `uv run --with pytest --with pytest-xdist --with pygments --with markdown-it-py --with pyyaml pytest tests -q -n auto --dist worksteal`. Add `--with playwright` to also run the page's tests (`tests/test_page*.py`) in the Google Chrome installed on the machine; without Playwright or Chrome they are skipped. Without pytest-xdist, drop it and `-n auto --dist worksteal` to run them one at a time, several times slower.
+
+  Tests run in parallel worker processes, in no fixed order, so each one builds everything it needs from its own `repo` or `tmp_path`: no module-level state that a test changes, no fixed paths or ports. A worker keeps one Chrome for all its page tests, so a page test keeps its state in its own `context`; and no test writes to `git_template`, the `.git` every repo starts as a copy of.
 
 ## License
 

@@ -230,6 +230,7 @@ body.map-mini .map li > button { padding: 4px 0; }
 .map li.active > button { color: var(--text); }
 .map li.active .dot i { box-shadow: none; }
 .map li.done .dot i { border-color: var(--add-fg); background: var(--add-fg); }
+.map li.changed .dot i { border-color: var(--amber); }
 .map .cnt { margin-left: auto; color: var(--ice); font: 10.5px var(--mono); visibility: hidden; padding-top: 2px; }
 .map li.hot .cnt { visibility: visible; }
 .map li.hot > button { color: var(--text); }
@@ -298,6 +299,8 @@ body.hdr-hidden .hdr { transform: translateY(-72px); opacity: 0; pointer-events:
 .progress circle { fill: none; stroke-width: 2.5; }
 .progress .track { stroke: rgba(255, 255, 255, 0.08); }
 .progress .pbar { stroke: var(--add-fg); stroke-linecap: round; transition: stroke-dashoffset 0.5s ease; }
+.p-chg { height: 22px; padding: 0 8px; border-radius: 999px; border: 1px solid rgba(240, 195, 138, 0.4); background: rgba(240, 195, 138, 0.1); color: var(--amber); font-size: 11.5px; cursor: pointer; }
+.p-chg:hover { background: rgba(240, 195, 138, 0.18); }
 .seg { display: inline-flex; padding: 2px; border-radius: 11px; background: rgba(0, 0, 0, 0.25); border: 1px solid var(--line); flex: none; }
 .seg .tbtn { height: 26px; padding: 0 10px; border-radius: 8px; }
 .seg .tbtn[aria-pressed="true"] { background: rgba(255, 255, 255, 0.1); border-color: transparent; }
@@ -455,6 +458,9 @@ body[data-mode="tour"] :is(.progress, .vsep, .seg, [data-act="files"], .diff-onl
 .fbtn.rev[aria-pressed="true"] { background: rgba(63, 185, 80, 0.16); border-color: rgba(63, 185, 80, 0.5); }
 .fbtn.rev[aria-pressed="true"] svg { stroke: var(--add-fg); }
 .frame.reviewed .fh .path { color: var(--text-2); }
+/* changed since review: the chip, and a bar in the gutter of each line the reader hasn't marked */
+.chip.chg { color: var(--amber); border-color: rgba(240, 195, 138, 0.4); background: rgba(240, 195, 138, 0.08); }
+.row.unseen::before, .half.unseen::before { background: linear-gradient(90deg, transparent 9px, var(--amber) 9px 12px, transparent 12px); }
 
 /* code never truncates and never hides behind a sideways scroll: long lines wrap */
 .code { padding: 6px 0; font: 12.5px/1.72 var(--mono); }
@@ -792,6 +798,14 @@ body.files-open { overflow: hidden; }
 .def-h .path b { color: var(--text-3); font-weight: 400; }
 .def-nav { display: flex; align-items: center; gap: 2px; color: var(--text-3); font: 11.5px var(--sans); white-space: nowrap; }
 .def-body { overflow: auto; overscroll-behavior: contain; }
+/* the trace a clicked name belongs to: a toggle in the panel's header */
+.def-tr { display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 10px 0 8px; border-radius: 999px; border: 1px solid var(--line-2); background: transparent; color: var(--text-2); font: 11.5px var(--sans); white-space: nowrap; cursor: pointer; flex: none; }
+.def-tr:hover { color: var(--text); background: rgba(255, 255, 255, 0.05); }
+.def-tr .i { width: 13px; height: 13px; }
+.def-tr[aria-pressed="true"] { color: var(--ice); background: var(--ice-soft); border-color: rgba(185, 226, 255, 0.45); }
+.def.compact { width: auto; max-width: min(460px, calc(100vw - 24px)); }
+.def-follows { margin: 0; padding: 12px 14px 14px; font-size: 13px; line-height: 1.9; color: var(--text-2); }
+.def-follows code { font-size: 12px; padding: 0.1em 0.4em; margin-right: 2px; border-radius: 5px; background: rgba(255, 255, 255, 0.06); color: var(--text); }
 /* one line-number column: the panel shows the file as it is now */
 .def .row { grid-template-columns: 10px 46px 16px minmax(0, 1fr); }
 .def .row > .ln:first-of-type { display: none; }

@@ -27,12 +27,20 @@
         localStorage.setItem(`${SID}:${k}`, JSON.stringify(v));
       } catch {}
     },
+    drop(k) {
+      try {
+        localStorage.removeItem(`${SID}:${k}`);
+      } catch {}
+    },
   };
   const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
   let traceNames = {};
+  let traceIds = {}; // the identifiers each trace follows
   try {
     traceNames = JSON.parse(body.dataset.traces || "{}");
+    traceIds = JSON.parse(body.dataset.traceIds || "{}");
   } catch {}
+  const traceCount = {}; // snippets each trace lights
 
   const flash = (el) => {
     el.classList.remove("flash");
@@ -200,7 +208,7 @@
       return h;
     }
     const n = side === "L" ? row.dataset.o : row.dataset.n;
-    h.className = `half ${kindOf(row)}${row.classList.contains("x") ? " x" : ""}`;
+    h.className = `half ${kindOf(row)}${row.classList.contains("x") ? " x" : ""}${row.classList.contains("unseen") ? " unseen" : ""}`;
     h.dataset.line = n;
     h.innerHTML = `<span class="ln">${n}</span>${row.querySelector(".sg").outerHTML}${row.querySelector("code").outerHTML}`;
     return h;
@@ -653,8 +661,57 @@
     placeDef();
   });
   addEventListener("resize", () => placeDef());
+  // The trace a clicked name belongs to, offered by a chip in the panel's header: a click opens, the
+  // chip traces. { g, origin }: the trace, and the name it starts from.
+  const defTr = $(".def-tr", defEl);
+  let defTrace = null;
+  function syncDefTrace() {
+    defTr.hidden = !defTrace;
+    if (!defTrace) return;
+    const { g } = defTrace;
+    const n = traceCount[g] || 0;
+    const on = traceOn === g;
+    const name = traceNames[g] || g;
+    $("span", defTr).textContent = on ? `Stop tracing ${name}` : `Trace ${name} · ${n} ${n === 1 ? "snippet" : "snippets"}`;
+    defTr.setAttribute("aria-pressed", String(on));
+    defTr.title = on ? "Stop tracing" : "Trace it: light up every snippet it passes through, starting from this one";
+  }
+  // the compact panel opens at the name: right under its line, or above it when there is no room below
+  function placeAt(el) {
+    if (narrow.matches) return void (defEl.style.left = defEl.style.top = defEl.style.right = "");
+    const line = (el.closest(".row, .srow, .half") || el).getBoundingClientRect();
+    const x = el.getBoundingClientRect().left;
+    const w = defEl.offsetWidth;
+    const h = defEl.offsetHeight;
+    const below = line.bottom + 4;
+    defEl.style.left = `${clamp(x - 12, 8, Math.max(8, innerWidth - w - 12))}px`;
+    defEl.style.top = `${below + h <= innerHeight - 8 ? below : Math.max(8, line.top - 4 - h)}px`;
+    defEl.style.right = "auto";
+  }
+  // a name that only starts a trace: the panel says what the trace follows
+  function showTracePanel(t) {
+    defTurn++;
+    defNow = null;
+    defTrace = t;
+    defEl.classList.add("compact");
+    defEl.setAttribute("aria-label", "Trace");
+    $(".path", defEl).textContent = t.origin.textContent;
+    $(".def-nav", defEl).hidden = true;
+    const p = document.createElement("p");
+    p.className = "def-follows";
+    p.append(`Part of the trace “${traceNames[t.g] || t.g}”. Tracing lights up every snippet these names appear in: `);
+    (traceIds[t.g] || []).forEach((id, i, all) => {
+      const c = document.createElement("code");
+      c.textContent = id;
+      p.append(c, i < all.length - 1 ? " " : "");
+    });
+    defBody.replaceChildren(p);
+    syncDefTrace();
+    defEl.hidden = false;
+    placeAt(t.origin);
+  }
   let defTurn = 0; // every open and close takes one, so a slow load cannot show over what came after it
-  async function showDef(ids, k = 0, pt = null) {
+  async function showDef(ids, k = 0, pt = null, trace = defTrace) {
     const m = defMeta[ids[k]];
     if (!m) return;
     const turn = ++defTurn;
@@ -667,6 +724,10 @@
     if (turn !== defTurn) return;
     const [i, at, len, path, line] = m;
     defNow = { ids, k };
+    defTrace = trace;
+    defEl.classList.remove("compact");
+    defEl.setAttribute("aria-label", "Definition");
+    syncDefTrace();
     const cut = path.lastIndexOf("/") + 1;
     const dir = document.createElement("span");
     dir.className = "dir";
@@ -693,6 +754,7 @@
     defEl.hidden = true;
     defBody.replaceChildren();
     defNow = null;
+    defTrace = null;
   }
 
   // ---------- story map ----------
@@ -1113,44 +1175,171 @@
     { passive: true },
   );
 
-  // ---------- reviewed ----------
+  // ---------- reviewed: exact marks, kept per change (D44) ----------
 
-  // keyed by the frame's content too, so a frame whose code changed since it was marked comes back unreviewed
-  // content, not position: inserting a frame mustn't drop the marks after it
-  const rkey = (f) => `${f.dataset.path || f.id}:${f.dataset.hash || ""}`;
-  const isReviewed = (f) => reviewed.has(rkey(f));
-  const reviewed = new Set(store.get("reviewed", []).filter((k) => diffFrames.some((f) => rkey(f) === k)));
+  // A mark holds a snippet's path, the hash of its rows, and which of its twins it was: the snippets with the same
+  // path and rows, ordered by where their first row sits in the file's diff (data-i). Its row hashes only find what
+  // changed under a mark that no snippet matches any more, and never make a snippet reviewed.
+  const MARKS_ = "code-story:reviewed:";
+  const MARKS = MARKS_ + (body.dataset.marks || SID);
+  const KEEP_DAYS = 120; // a mark no page has used for this long goes, and so does a change's store
+  const MAX_CHARS = 300000; // per change, oldest marks first
+  const MAX_ALL = 2000000; // all changes, least recently used first: every file:// page shares one quota
+  const LABEL = "Changed since review";
+  const TIP = "The code changed after you marked it reviewed. Bars mark the lines that differ from what you marked, and the lines either side of one that was removed";
+  const today = Math.floor(Date.now() / 864e5);
+  const rowHash = (r) => {
+    let h = 0x811c9dc5;
+    for (const c of $(".sg", r).textContent + $("code", r).textContent) h = Math.imul(h ^ c.codePointAt(0), 16777619);
+    return (h >>> 0).toString(36);
+  };
+  const snips = diffFrames.map((f) => {
+    const rows = $$(".code.u .row", f);
+    f._chip = Object.assign(document.createElement("span"), { className: "chip chg", textContent: LABEL, title: TIP, hidden: true });
+    $(":scope > .fh .stat", f).after(f._chip);
+    return (f._s = { f, p: f.dataset.path || f.id, h: f.dataset.hash || "", at: +($(".row[data-i]", f)?.dataset.i || 0), rows, ks: rows.map(rowHash) });
+  });
+  const placesOf = (s) => [...new Set(snips.filter((t) => t.p === s.p && t.h === s.h).map((t) => t.at))].sort((a, b) => a - b);
+  for (const s of snips) [s.k, s.n] = [placesOf(s).indexOf(s.at) + 1, placesOf(s).length];
+  // { path: [[day, hash, k, n, "row hashes"], …] }: the k-th of n twins
+  const readMarks = () => {
+    try {
+      const m = JSON.parse(localStorage.getItem(MARKS) || "{}");
+      const ok = (x) => typeof x?.[0] === "number" && typeof x[1] === "string" && typeof x[4] === "string";
+      for (const p in m) if (!(m[p] = Array.isArray(m[p]) ? m[p].filter(ok) : []).length) delete m[p];
+      return m?.constructor === Object ? m : {};
+    } catch {
+      return {};
+    }
+  };
+  let marks = TOUR ? {} : readMarks();
+  const dayOf = (v) => Math.max(0, ...[...v.matchAll(/\[(\d+),"/g)].map((d) => +d[1])); // a store's last use, unparsed
+  // reads again first, so another tab's marks survive; a page load has just read them and passes fresh = false
+  function editMarks(fn, fresh = true) {
+    if (fresh) marks = readMarks();
+    fn(marks);
+    let size = JSON.stringify(marks).length;
+    for (const [p, x] of Object.entries(marks).flatMap(([p, l]) => l.map((x) => [p, x])).sort((a, b) => a[1][0] - b[1][0]))
+      if (today - x[0] > KEEP_DAYS || size > MAX_CHARS) {
+        size -= JSON.stringify(x).length + 1;
+        marks[p].splice(marks[p].indexOf(x), 1);
+      }
+    try {
+      const json = JSON.stringify(marks, (k, v) => (Array.isArray(v) && !v.length ? undefined : v));
+      json === "{}" ? localStorage.removeItem(MARKS) : localStorage.setItem(MARKS, json);
+      const stores = Object.keys(localStorage).filter((k) => k.startsWith(MARKS_) && k !== MARKS).map((k) => [k, localStorage.getItem(k)]);
+      size = stores.reduce((a, [, v]) => a + v.length, (localStorage.getItem(MARKS) || "").length);
+      for (const [k, v, d] of stores.map(([k, v]) => [k, v, dayOf(v)]).sort((a, b) => a[2] - b[2]))
+        if (today - d > KEEP_DAYS || size > MAX_ALL) localStorage.removeItem(k), (size -= v.length);
+    } catch {}
+  }
+  // the rows a and b have in common, in order, as [i, j] pairs
+  function lcs(a, b) {
+    const [n, m] = [a.length, b.length];
+    if (n * m > 1e6) return [];
+    const t = new Uint16Array((n + 1) * (m + 1));
+    const at = (i, j) => i * (m + 1) + j;
+    for (let i = n - 1; i >= 0; i--)
+      for (let j = m - 1; j >= 0; j--) t[at(i, j)] = a[i] === b[j] ? t[at(i + 1, j + 1)] + 1 : Math.max(t[at(i + 1, j)], t[at(i, j + 1)]);
+    const out = [];
+    for (let i = 0, j = 0; i < n && j < m; )
+      if (a[i] === b[j]) out.push([i++, j++]);
+      else t[at(i + 1, j)] >= t[at(i, j + 1)] ? i++ : j++;
+    return out;
+  }
+  // every snippet's state (st), its bars, and the changed marks offered to it (lost); a mark in use gets `used`
+  function judge() {
+    for (const s of snips) {
+      const x = (marks[s.p] || []).find((x) => x[1] === s.h && x[2] === s.k && x[3] === s.n);
+      [s.st, s.bars, s.lost] = [x ? "reviewed" : "new", null, []];
+      if (x) x.used = true;
+    }
+    // A mark whose rows no snippet has at any place: the code under it changed. It goes to the unreviewed snippet
+    // of its path that shares the most rows with it, at least half of the shorter, and can only add bars there.
+    for (const p in marks)
+      for (const x of marks[p]) {
+        if (snips.some((s) => s.p === p && s.h === x[1])) continue;
+        const ks = x[4].split(" ");
+        let best = null;
+        for (const s of snips) {
+          const pairs = s.p === p && s.st === "new" ? lcs(s.ks, ks) : [];
+          if (pairs.length >= Math.min(s.ks.length, ks.length) / 2 && pairs.length > (best?.pairs.length || 0)) best = { s, pairs };
+        }
+        if (best) best.s.lost.push({ x, pairs: best.pairs }), (x.used = true);
+      }
+    // bars: the rows no lost mark had, and the rows either side of one it had that is gone with nothing in its place
+    for (const s of snips.filter((s) => s.lost.length)) {
+      const seen = new Set(s.lost.flatMap((l) => l.pairs.map((q) => q[0])));
+      const bars = new Set(s.rows.map((_, i) => i).filter((i) => !seen.has(i)));
+      for (const { pairs } of s.lost) pairs.forEach(([a, b], n) => pairs[n + 1]?.[0] === a + 1 && pairs[n + 1][1] > b + 1 && bars.add(a).add(a + 1));
+      if (bars.size) [s.st, s.bars] = ["changed", new Set([...bars].map((i) => s.rows[i]))];
+    }
+  }
+  const isReviewed = (f) => f._s?.st === "reviewed";
+  const isChanged = (f) => f._s?.st === "changed";
   function refreshReviewed() {
     if (TOUR) return;
-    for (const f of diffFrames) {
-      const on = isReviewed(f);
-      f.classList.toggle("reviewed", on);
+    judge();
+    for (const { f, st, bars, rows } of snips) {
+      f.classList.toggle("reviewed", st === "reviewed");
+      f.classList.toggle("changed", st === "changed");
+      f._chip.hidden = st !== "changed";
+      for (const r of rows) for (const h of [r, r._h, r._hL, r._hR]) h?.classList.toggle("unseen", !!bars?.has(r));
       const b = $('.fh [data-act="reviewed"]', f);
-      if (b) {
-        b.setAttribute("aria-pressed", String(on));
-        b.title = on ? "Reviewed: click to undo" : "Mark reviewed (r)";
-      }
+      b?.setAttribute("aria-pressed", String(st === "reviewed"));
+      if (b) b.title = st === "reviewed" ? "Reviewed: click to undo" : st === "changed" ? `${LABEL}: mark it reviewed (r)` : "Mark reviewed (r)";
     }
-    const done = diffFrames.filter(isReviewed).length;
-    const n = diffFrames.length;
-    const bar = $(".progress .pbar");
+    const [done, open, n] = [diffFrames.filter(isReviewed).length, diffFrames.filter(isChanged).length, diffFrames.length];
     const c = 2 * Math.PI * 8.5;
-    bar.style.strokeDasharray = c;
-    bar.style.strokeDashoffset = c * (1 - done / (n || 1));
+    Object.assign($(".progress .pbar").style, { strokeDasharray: c, strokeDashoffset: c * (1 - done / (n || 1)) });
     $(".progress .p-txt").textContent = `${done}/${n} reviewed`;
-    $(".progress").title = `${done} of ${n} changed frames reviewed`;
+    $(".progress").title = `${done} of ${n} snippets with changes reviewed`;
+    Object.assign($(".progress .p-chg"), { hidden: !open, textContent: `${open} to revisit` });
     setBar(done / (n || 1));
-    $(".side-f .f-txt").textContent = `${done} of ${n} frames reviewed`;
+    $(".side-f .f-txt").textContent = `${done} of ${n} snippets reviewed` + (open ? `, ${open} to revisit` : "");
     for (const [ch, li] of nodes) {
       const own = diffFrames.filter((f) => ch.contains(f));
       li.classList.toggle("done", own.length > 0 && own.every(isReviewed));
+      li.classList.toggle("changed", own.some(isChanged));
     }
   }
-  function toggleReviewed(f) {
-    isReviewed(f) ? reviewed.delete(rkey(f)) : reviewed.add(rkey(f));
-    store.set("reviewed", [...reviewed]);
+  // marking also drops marks of these rows that match nothing now, and the changed marks offered to this snippet
+  function storeMark(m, f, on) {
+    const s = f._s;
+    const lost = new Set(s.lost.map((l) => l.x[1]));
+    const l = (m[s.p] || []).filter((x) => (x[1] !== s.h || (x[3] === s.n && x[2] !== s.k)) && !(on && lost.has(x[1])));
+    if (on) l.push([today, s.h, s.k, s.n, s.ks.join(" ")]);
+    m[s.p] = l;
+  }
+  // folds what became reviewed, opens what stopped being (D42); the rest than `f` without moving what is on screen
+  function repaint(f) {
+    const was = new Map(diffFrames.map((x) => [x, isReviewed(x)]));
     refreshReviewed();
-    setFrame(f, isReviewed(f));
+    const flip = diffFrames.filter((x) => x !== f && was.get(x) !== isReviewed(x));
+    if (flip.length) keepAnchor(() => flip.forEach((x) => setFrame(x, isReviewed(x), false)));
+    if (f) setFrame(f, isReviewed(f));
+  }
+  const toggleReviewed = (f) => (editMarks((m) => storeMark(m, f, !isReviewed(f))), repaint(f));
+  if (!TOUR) {
+    // marks from before D44 (the path and the hash's first 8 characters) move once; a mark in use keeps its day,
+    // so a load writes at most once a day, and only when something changed
+    const old = new Set([].concat(store.get("reviewed", [])));
+    const was = (s) => `${s.p}:${s.f.dataset.was || s.h.slice(0, 8)}`;
+    const moved = snips.filter((s) => old.has(was(s)));
+    judge();
+    if (moved.length || Object.values(marks).some((l) => l.some((x) => x.used && x[0] < today)))
+      editMarks((m) => {
+        for (const s of moved) storeMark(m, s.f, true);
+        for (const l of Object.values(m)) for (const x of l) if (x.used) x[0] = today;
+      }, false);
+    if (moved.length) moved.forEach((s) => old.delete(was(s))), old.size ? store.set("reviewed", [...old]) : store.drop("reviewed");
+  }
+  addEventListener("storage", (e) => !TOUR && e.key === MARKS && ((marks = readMarks()), repaint(null)));
+  // the next snippet below the middle of the screen that is left to revisit, from the top after the last
+  function nextChanged() {
+    const list = diffFrames.filter(isChanged);
+    const f = list.find((x) => x.getBoundingClientRect().top > innerHeight / 2 + 1) || list[0];
+    if (f) goTo(f, { block: "center" }), toast(`${LABEL}: snippet ${list.indexOf(f) + 1} of ${list.length}`);
   }
 
   // ---------- frames fold to their header ----------
@@ -1263,6 +1452,7 @@
     $(".tname", traceBtn).textContent = g ? traceNames[g] || g : "Trace";
     $$("#trace-pop button[data-tr]").forEach((b) => b.setAttribute("aria-checked", String(b.dataset.tr === g)));
     $('#trace-pop [data-act="trace-clear"]').hidden = !g;
+    syncDefTrace();
     if (!g) return;
     const spans = traceSpans(g);
     spans.forEach((x) => x.classList.add("on"));
@@ -1291,8 +1481,17 @@
   function showTraceAt() {
     const n = lit.length;
     const c = $(".tp-count");
-    c.textContent = traceIdx >= 0 ? `${traceIdx + 1} / ${n}` : `${n} ${n === 1 ? "frame" : "frames"}`;
-    c.title = traceIdx >= 0 ? `Frame ${traceIdx + 1} of ${n} that show it` : "";
+    c.textContent = traceIdx >= 0 ? `${traceIdx + 1} / ${n}` : `${n} ${n === 1 ? "snippet" : "snippets"}`;
+    c.title = traceIdx >= 0 ? `Snippet ${traceIdx + 1} of ${n} that show it` : "";
+  }
+  // a click on a name of the running trace: its snippet is where the stepper stands now
+  function stepTo(f) {
+    const i = lit.indexOf(f);
+    if (i < 0 || i === traceIdx) return;
+    if (traceIdx >= 0) lit[traceIdx].classList.remove("current");
+    traceIdx = i;
+    f.classList.add("current");
+    showTraceAt();
   }
   function stepTrace(d) {
     if (!traceOn || !lit.length) return;
@@ -1308,7 +1507,7 @@
   }
   {
     for (const [g, name] of Object.entries(traceNames)) {
-      const n = new Set(traceSpans(g).map(holder).filter(Boolean)).size;
+      const n = (traceCount[g] = new Set(traceSpans(g).map(holder).filter(Boolean)).size);
       if (!n) continue;
       const b = document.createElement("button");
       b.type = "button";
@@ -1318,7 +1517,7 @@
       b.dataset.tr = g;
       b.innerHTML = '<span class="nm"></span><span class="meta"></span>';
       $(".nm", b).textContent = name;
-      $(".meta", b).textContent = `${n} ${n === 1 ? "frame" : "frames"}`;
+      $(".meta", b).textContent = `${n} ${n === 1 ? "snippet" : "snippets"}`;
       pop.append(b);
     }
     const sep = document.createElement("div");
@@ -1923,8 +2122,11 @@
 
   document.addEventListener("click", (e) => {
     if (!pop.hidden && !e.target.closest('#trace-pop, [data-act="trace-menu"]')) setPop(false);
-    // a click outside the definition panel closes it, and does nothing else unless it lands on a control
-    if (!defEl.hidden && help.hidden && !e.target.closest("#def, [data-d]") && !String(getSelection()).length) {
+    const tr = e.target.closest(".tr");
+    // a name the trace can start from: in the story itself, in a trace that lights some snippet there
+    const traced = tr && traceable(tr) && traceCount[tr.dataset.tr] ? tr : null;
+    // a click outside the panel closes it, and does nothing else unless it lands on a control
+    if (!defEl.hidden && help.hidden && !e.target.closest("#def, [data-d]") && !traced && !String(getSelection()).length) {
       closeDef();
       if (!e.target.closest("a, button, summary, [data-act]")) return;
     }
@@ -1934,6 +2136,9 @@
       switch (t.dataset.act) {
         case "reviewed":
           toggleReviewed(f);
+          break;
+        case "next-changed":
+          nextChanged();
           break;
         case "frame-toggle":
           setFrame(f, !f.classList.contains("collapsed"));
@@ -2007,6 +2212,16 @@
         case "def-close":
           closeDef();
           break;
+        case "def-trace": {
+          const { g, origin } = defTrace;
+          if (traceOn === g) setTrace(null);
+          else {
+            setTrace(g, origin);
+            // the compact panel only offered the trace; a definition stays to be read
+            if (defEl.classList.contains("compact")) closeDef();
+          }
+          break;
+        }
         case "def-prev":
         case "def-next": {
           const n = defNow.ids.length;
@@ -2069,16 +2284,19 @@
       return;
     }
     if (e.target.closest(".ghjump")) return;
-    const tr = e.target.closest(".tr");
     const named = e.target.closest("[data-d]");
-    // a name that leads to its definition and also starts a trace: the click opens, alt-click traces
-    if (named && !(e.altKey && tr && traceable(tr)) && !String(getSelection()).length) {
-      // a hop inside the panel keeps it where it is
-      showDef(named.dataset.d.split(" "), 0, named.closest("#def") ? null : { x: e.clientX, y: e.clientY });
+    // a click opens the panel and never traces; alt-click traces at once
+    if (traced && e.altKey) {
+      setTrace(traced.dataset.tr === traceOn ? null : traced.dataset.tr, traced);
       return;
     }
-    if (tr && traceable(tr)) {
-      setTrace(tr.dataset.tr === traceOn ? null : tr.dataset.tr, tr);
+    if ((named || traced) && !String(getSelection()).length) {
+      const t = traced && { g: traced.dataset.tr, origin: traced };
+      if (traced && traced.dataset.tr === traceOn) stepTo(holder(traced));
+      // a hop inside the panel keeps it where it is
+      const pt = named && named.closest("#def") ? null : { x: e.clientX, y: e.clientY };
+      if (named) showDef(named.dataset.d.split(" "), 0, pt, t);
+      else showTracePanel(t);
       return;
     }
     const line = e.target.closest(".code .row, .code .srow");

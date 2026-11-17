@@ -7,7 +7,7 @@
 <title>{{page_title}}</title>
 <style>{{css}}</style>
 </head>
-<body data-mode="{{mode}}" data-story="{{story_id}}" data-traces="{{traces_json}}" data-syns="{{syn_json}}" data-syn="{{syn_default}}">
+<body data-mode="{{mode}}" data-story="{{story_id}}" data-marks="{{marks_id}}" data-traces="{{traces_json}}" data-trace-ids="{{trace_ids_json}}" data-syns="{{syn_json}}" data-syn="{{syn_default}}">
 
 <header class="hdr hdr-l glass" aria-label="Change">
   <button class="ibtn" data-act="side" aria-pressed="true" title="Story map (m)" aria-label="Toggle story map">
@@ -18,7 +18,7 @@
 </header>
 
 <header class="hdr hdr-r glass" aria-label="Review tools">
-  <span class="progress" title="Changed frames you've marked reviewed"><svg viewBox="0 0 22 22" aria-hidden="true"><circle class="track" cx="11" cy="11" r="8.5"/><circle class="pbar" cx="11" cy="11" r="8.5"/></svg><span class="p-txt"></span></span>
+  <span class="progress" title="Snippets with changes you've marked reviewed"><svg viewBox="0 0 22 22" aria-hidden="true"><circle class="track" cx="11" cy="11" r="8.5"/><circle class="pbar" cx="11" cy="11" r="8.5"/></svg><span class="p-txt"></span><button class="p-chg" data-act="next-changed" hidden title="Go to the next snippet whose code changed after you marked it reviewed"></button></span>
   <span class="vsep"></span>
   <button class="tbtn" data-act="trace-menu" aria-expanded="false" aria-haspopup="true" title="Follow a value through the change">
     <svg class="i" viewBox="0 0 16 16"><circle cx="3.5" cy="8" r="1.5"/><circle cx="12.5" cy="8" r="1.5"/><path d="M5 8h6"/></svg>
@@ -41,7 +41,7 @@
 </header>
 
 <div id="trace-pop" class="pop glass" hidden role="menu">
-  <div class="pop-hint">Lights up every frame a value passes through. Step through them with <kbd>[</kbd>&nbsp;and&nbsp;<kbd>]</kbd>. Names you can trace highlight under the pointer in the code; clicking one starts there.</div>
+  <div class="pop-hint">Lights up every snippet a value passes through. Step through them with <kbd>[</kbd>&nbsp;and&nbsp;<kbd>]</kbd>. Names you can trace highlight under the pointer in the code: a click shows the trace in a panel, where its chip starts it, and <kbd>alt</kbd>-click starts it at once.</div>
 </div>
 
 <div id="help" class="sheet" hidden>
@@ -49,16 +49,16 @@
     <div class="sheet-h"><button class="traffic" data-act="help-close" title="Close (Esc)" aria-label="Close keyboard shortcuts"><svg viewBox="0 0 12 12" aria-hidden="true"><path d="M4 4l4 4M8 4l-4 4"/></svg></button><h3>Keyboard shortcuts</h3></div>
     <dl>
       <dt><kbd>j</kbd> <kbd>k</kbd></dt><dd>Next and previous chapter</dd>
-      <dt class="diff-only"><kbd>r</kbd></dt><dd class="diff-only">Mark the frame in the middle of the screen reviewed</dd>
+      <dt class="diff-only"><kbd>r</kbd></dt><dd class="diff-only">Mark the snippet in the middle of the screen reviewed. The PR, branch and working-tree stories of the same change share the marks, and identical code at another place in the file needs its own. A snippet whose code changed after you marked it says "Changed since review" and stays open with a bar beside each line that differs. That hint is a best guess: it misses a line removed at the snippet's very start or end. The "to revisit" count in the header steps through them</dd>
       <dt class="diff-only"><kbd>s</kbd></dt><dd class="diff-only">Switch between unified and split</dd>
-      <dt class="diff-only"><kbd>f</kbd></dt><dd class="diff-only">Open the full diff at the current frame</dd>
+      <dt class="diff-only"><kbd>f</kbd></dt><dd class="diff-only">Open the full diff at the current snippet</dd>
       <dt><kbd>[</kbd> <kbd>]</kbd></dt><dd>Step through the current trace</dd>
       <dt><kbd>n</kbd></dt><dd>Show or hide review notes</dd>
       <dt><kbd>m</kbd></dt><dd>Collapse or expand the story map; drag its header to move it, double-click the header to put it back</dd>
       <dt>Click a line</dt><dd>Select it. Shift-click or drag down the line numbers for a range; <kbd>⌘</kbd>/<kbd>ctrl</kbd>-click adds or removes lines. The address bar keeps the link</dd>
-      <dt>Click a frame's header</dt><dd>Fold the frame to its header, or open it again. Marking a frame reviewed folds it</dd>
-      <dt>Click an underlined name</dt><dd>Open its definition beside the code: a function, class, constant, dbt model or macro. Names that underline under the pointer have one on this page. Drag the panel by its header; double-click the header to put it back. A click outside the panel, or <kbd>esc</kbd>, closes it. Where the name can also start a trace, <kbd>alt</kbd>-click starts it</dd>
-      <dt>Arrows between lines</dt><dd>Show more of the file: 20 lines up or down, or everything hidden there. Shift-click one for the whole file; the fold button in the frame's header hides them again</dd>
+      <dt>Click a snippet's header</dt><dd>Fold the snippet to its header, or open it again. Marking a snippet reviewed folds it</dd>
+      <dt>Click a name</dt><dd>An underlined name opens its definition beside the code: a function, class, constant, field, dbt model or macro on this page. A name that belongs to a trace puts the trace's chip in the panel's header ("Trace byte cap · 5 snippets"): press it to start the trace from this snippet, and again to stop it. A traced name with no definition opens a small panel that names the trace and lists what it follows. A click never starts a trace by itself; <kbd>alt</kbd>-click does. Drag the panel by its header; double-click the header to put it back. A click outside the panel, or <kbd>esc</kbd>, closes it</dd>
+      <dt>Arrows between lines</dt><dd>Show more of the file: 20 lines up or down, or everything hidden there. Shift-click one for the whole file; the fold button in the snippet's header hides them again</dd>
       <dt><kbd>t</kbd></dt><dd>Next code colour theme, <kbd>shift</kbd>+<kbd>t</kbd> the previous one. <select id="syn-pick" aria-label="Code colours"></select></dd>
       <dt><kbd>esc</kbd></dt><dd>Close whatever is open</dd>
     </dl>
@@ -67,8 +67,8 @@
 
 <div class="tracepill glass" role="status">
   <span>Tracing</span><span class="tp-name"></span><span class="tp-count"></span>
-  <button class="ibtn" data-act="trace-prev" title="Previous frame ([)" aria-label="Previous frame"><svg class="i" viewBox="0 0 16 16"><path d="M10 3.5L5.5 8l4.5 4.5"/></svg></button>
-  <button class="ibtn" data-act="trace-next" title="Next frame (])" aria-label="Next frame"><svg class="i" viewBox="0 0 16 16"><path d="M6 3.5L10.5 8 6 12.5"/></svg></button>
+  <button class="ibtn" data-act="trace-prev" title="Previous snippet ([)" aria-label="Previous snippet"><svg class="i" viewBox="0 0 16 16"><path d="M10 3.5L5.5 8l4.5 4.5"/></svg></button>
+  <button class="ibtn" data-act="trace-next" title="Next snippet (])" aria-label="Next snippet"><svg class="i" viewBox="0 0 16 16"><path d="M6 3.5L10.5 8 6 12.5"/></svg></button>
   <button class="ibtn" data-act="trace-clear" title="Stop tracing (esc)" aria-label="Stop tracing"><svg class="i" viewBox="0 0 16 16"><path d="M4 4l8 8M12 4l-8 8"/></svg></button>
 </div>
 
@@ -108,6 +108,7 @@
       <span class="def-n"></span>
       <button class="ibtn" data-act="def-next" title="Next candidate" aria-label="Next candidate"><svg class="i" viewBox="0 0 16 16"><path d="M6 3.5L10.5 8 6 12.5"/></svg></button>
     </span>
+    <button class="def-tr" data-act="def-trace" aria-pressed="false" hidden><svg class="i" viewBox="0 0 16 16" aria-hidden="true"><circle cx="3.5" cy="8" r="1.5"/><circle cx="12.5" cy="8" r="1.5"/><path d="M5 8h6"/></svg><span></span></button>
   </div>
   <div class="def-body"></div>
 </aside>
