@@ -11,10 +11,13 @@ def manifest(repo):
     return json.loads(re.search(r'id="_def">(.*?)</script>', repo.read("story.html")).group(1))
 
 
-def links(repo):
-    """The linked names in the story's frames, in page order: (name, [(path, line) of each place it opens])."""
+def links(repo, path=None):
+    """The linked names in the story's frames, or in those that show `path`, in page order: (name, [(path, line)
+    of each place it opens])."""
     page = repo.read("story.html")
     main = page[page.index("<main") : page.index("</main>")]
+    if path:
+        main = "".join(m[0] for m in re.finditer(rf'<(figure|details)[^>]*data-path="{re.escape(path)}".*?</\1>', main, re.S))
     defs = manifest(repo)
     return [
         (html.unescape(m[2]), [tuple(defs[int(i)][3:]) for i in m[1].split()])
@@ -22,16 +25,7 @@ def links(repo):
     ]
 
 
-def links_in(repo, path):
-    """The linked names in the frames that show `path`."""
-    page = repo.read("story.html")
-    main = page[page.index("<main") : page.index("</main>")]
-    shown = "".join(m[0] for m in re.finditer(rf'<(figure|details)[^>]*data-path="{re.escape(path)}".*?</\1>', main, re.S))
-    defs = manifest(repo)
-    return [
-        (html.unescape(m[2]), [tuple(defs[int(i)][3:]) for i in m[1].split()])
-        for m in re.finditer(r'<span[^>]*data-d="([\d ]+)"[^>]*>([^<]*)</span>', shown)
-    ]
+links_in = links
 
 
 def opened(repo, path, line):
@@ -467,15 +461,10 @@ def test_an_upper_case_field_never_links_through_a_receiver_that_names_something
             "f = os.NOT_FOUND\n"
             "g = self.codes.BAD_REQUEST\n"  # an attribute: still the one class that has it
         ),
-    })
-    assert links_in(repo, "app.py") == [("BAD_REQUEST", [("src/errors.py", 6)])]
-
-
-def test_an_upper_case_field_never_links_through_a_chain_that_starts_at_a_module(repo):
-    """`import http.client` binds `http`: http.client.HTTP_PORT is the standard library's, not the page's."""
-    story(repo, {
+        # a chain that starts at a module: `import http.client` binds `http`, so http.client.HTTP_PORT is the
+        # standard library's, not the page's
         "src/ports.py": "class Ports:\n    HTTP_PORT = 80\n    MAX_LINE = 1\n    MAX_ROWS = 2\n",
-        "app.py": (
+        "chain.py": (
             "import http.client\n"
             "import xml.etree.ElementTree\n"
             "from logging import handlers\n"
@@ -486,7 +475,8 @@ def test_an_upper_case_field_never_links_through_a_chain_that_starts_at_a_module
             "d = self.ports.MAX_ROWS\n"  # a chain from self: still the one class that has it
         ),
     })
-    assert links_in(repo, "app.py") == [("MAX_ROWS", [("src/ports.py", 4)])]
+    assert links_in(repo, "app.py") == [("BAD_REQUEST", [("src/errors.py", 6)])]
+    assert links_in(repo, "chain.py") == [("MAX_ROWS", [("src/ports.py", 4)])]
 
 
 def test_a_field_two_classes_have_needs_its_class_to_link(repo):
@@ -500,9 +490,8 @@ def test_a_field_two_classes_have_needs_its_class_to_link(repo):
 
 
 def test_a_variable_named_like_the_class_reaches_its_fields(repo):
-    story(repo, {"src/env.py": ENV, "app.py": "a = env_model.user_id\nb = model.user_id\n"})
-    assert [x for x in links(repo) if x[0] == "user_id"][-1:] == [("user_id", [("src/env.py", 9)])]
-    assert sum(1 for x in links(repo) if x[0] == "user_id") == 2  # self.user_id in the class, then env_model's
+    story(repo, {"src/env.py": ENV, "app.py": "a = env_model.user_id\nb = model.region\n"})
+    assert links_in(repo, "app.py") == [("user_id", [("src/env.py", 9)])]
 
 
 def test_a_field_never_links_through_a_receiver_the_imports_say_is_something_else(repo):

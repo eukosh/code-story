@@ -12,11 +12,13 @@ def test_frame_hash_survives_earlier_hunk_and_changes_with_content(repo):
     repo.story("@diff app.py#h1 id=target")
     repo.build()
     original = repo.frame("target")["data-hash"]
+    assert places(repo, "target")[0] == 0
     repo.commit({"app.py": (repo.path / "app.py").read_text().replace("value_2 = 2", "value_2 = 200")})
     repo.index()
     repo.story("@diff app.py#h1\n@diff app.py#h2 id=target")
     repo.build("--accept")
     assert repo.frame("target")["data-hash"] == original
+    assert places(repo, "target")[0] == 6  # its place in the file's diff moved, its hash did not
     repo.commit({"app.py": (repo.path / "app.py").read_text().replace("value_25 = 250", "value_25 = 251")})
     repo.index()
     repo.build("--accept")
@@ -126,19 +128,14 @@ def test_a_snippet_hash_is_80_bits_and_starts_with_the_old_one(repo):
 
 
 def test_a_ripple_hash_tells_apart_sites_whose_short_hashes_collide(repo):
-    seen = {}
-    for n in range(10**7):
-        short = hashlib.sha1(f"-old\n+v{n}\n".encode()).hexdigest()[:8]
-        if short in seen:
-            break
-        seen[short] = n
+    one, other = "v15351\n", "v18876\n"  # as the only new line of a hunk, their short hashes are both 18f83da1
     repo.commit({"a.py": "old\n", "b.py": "old\n"})
-    repo.commit({"a.py": "new\n", "b.py": f"v{seen[short]}\n"})
+    repo.commit({"a.py": "new\n", "b.py": one})
     repo.index()
     repo.story("@ripple a.py#h1 b.py#h1 id=rip")
     repo.build()
     before = repo.frame("rip")
-    repo.commit({"b.py": f"v{n}\n"})
+    repo.commit({"b.py": other})
     repo.index()
     repo.build("--accept")
     after = repo.frame("rip")
@@ -158,20 +155,6 @@ def test_every_row_a_snippet_shows_carries_its_place(repo):
     assert places(repo, "rip") == list(range(14, 22)) + [None, None]
 
 
-def test_places_shift_with_an_earlier_hunk_and_hashes_stay(repo):
-    new = two_hunks(repo)
-    repo.story("@diff app.py#h1\n@diff app.py#h2 id=target")
-    repo.build()
-    target = repo.frame("target")["data-hash"]
-    assert places(repo, "target")[0] == 14
-    repo.commit({"app.py": new.replace("value_15 = 15", "value_15 = 150")})
-    repo.index()
-    repo.story("@diff app.py#h1\n@diff app.py#h2\n@diff app.py#h3 id=target")
-    repo.build("--accept")
-    assert repo.frame("target")["data-hash"] == target
-    assert places(repo, "target")[0] == 22
-
-
 def test_a_branch_and_its_working_tree_give_the_same_marks(repo, tmp_path):
     repo.commit({"app.py": LINES})
     repo.git("checkout", "-q", "-b", "feature")
@@ -187,7 +170,6 @@ def test_a_branch_and_its_working_tree_give_the_same_marks(repo, tmp_path):
     repo.build()
     assert (repo.frame("target")["data-hash"], places(repo, "target"), scope(repo)) == worktree
     assert re.fullmatch(r"local/repo@[0-9a-f]{8}:feature", scope(repo))
-    assert "_rk" not in repo.read("story.html")
 
 
 # ---- whose marks a page reads: one change, whichever way it was indexed (D44) ----

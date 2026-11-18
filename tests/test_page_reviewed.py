@@ -231,6 +231,7 @@ AUTH = "def handle(req):\n    log(req)\n    verify_token(req)\n    return run(re
 LONG = "def handle(req):\n    log(req)\n    user = load_user(req)\n    verify_token(req)\n    audit(user)\n    return run(req, user)\n"
 SHORT = "".join(f"v{n} = {n}\n" for n in range(5))
 STEPS = [f"step_{n}()\n" for n in range(1, 9)]
+BIG = [f"line {n}\n" for n in range(1001)]
 swapped = lambda s: s.replace("    verify_token(req)\n", "    verify_token_v2(req)\n")
 kept = lambda s: s.replace("    verify_token(req)\n", "    verify_token(req)\n    verify_token_v2(req)\n")
 
@@ -246,15 +247,34 @@ EDITS = {
     "a rewrite": (LINES, ADDED, ADDED.replace(BLOCK, "".join(f"other_{n} = {n}\n" for n in range(9))), new()),
     # every row is shared, but in order only two of eight: less than half, so not the code it was
     "the same lines in another order": ("", "".join(STEPS), STEPS[0] + "".join(reversed(STEPS[1:])), new()),
+    "one line edited in a thousand": ("", "".join(BIG), "".join(BIG).replace("line 500\n", "line 500!\n"), changed("line 500!")),
 }
 
 
-@pytest.mark.parametrize("base, marked, edited, expect", EDITS.values(), ids=EDITS)
-def test_code_edited_under_a_mark(repo, story_page, base, marked, edited, expect):
-    change(repo, "a.py", base, marked)
-    page = opened(repo, story_page, ONE, "one")
-    again(repo, story_page, page, {"a.py": edited})
-    assert state(page, "one") == expect
+def test_code_edited_under_a_mark(repo, story_page):
+    """Each case in a file of its own, all in one story: one build before and one after."""
+    ids = [f"c{i}" for i in range(len(EDITS))]
+    files = lambda k: {f"{c}.py": case[k] for c, case in zip(ids, EDITS.values())}
+    repo.commit(files(0))
+    repo.commit(files(1))
+    repo.index()
+    page = opened(repo, story_page, "\n".join(f"@diff {c}.py#h1 id={c}" for c in ids), *ids)
+    again(repo, story_page, page, files(2))
+    assert {name: state(page, c) for name, c in zip(EDITS, ids)} == {name: case[3] for name, case in EDITS.items()}
+
+
+def test_to_revisit_reaches_every_snippet_on_a_page_too_short_to_scroll(repo, story_page):
+    files = dict.fromkeys(("f0.py", "f1.py", "f2.py"), "a = 1\nb = 2\n")
+    repo.commit(dict.fromkeys(files, "a = 1\n"))
+    repo.commit(files)
+    repo.index()
+    page = opened(repo, story_page, "\n".join(f"@diff f{i}.py#h1 id=s{i}" for i in range(3)), "s0", "s1", "s2")
+    again(repo, story_page, page, dict.fromkeys(files, "a = 1\nb = 3\n"))
+    seen = []
+    for _ in range(3):
+        page.locator(".progress .p-chg").click()
+        seen.append(page.locator(".toast").inner_text()[-6:])
+    assert sorted(seen) == ["1 of 3", "2 of 3", "3 of 3"]
 
 
 def test_a_snippet_whose_short_hash_collides_is_changed(repo, story_page):
@@ -288,10 +308,10 @@ def test_changed_code_goes_to_one_snippet_only(repo, story_page):
 
 def test_changed_code_goes_to_a_snippet_of_its_own_file(repo, story_page):
     edit = LINES.replace("value_9 = 9", "value_9 = 90")
-    repo.commit({"a.py": LINES, "b.py": LINES})
-    repo.commit({"a.py": edit, "b.py": edit})
+    repo.commit({"a.py": LINES, "constructor": LINES})  # a name every JavaScript object answers to
+    repo.commit({"a.py": edit, "constructor": edit})
     repo.index()
-    page = opened(repo, story_page, "@diff a.py#h1 id=a\n@diff b.py#h1 id=b", "a")
+    page = opened(repo, story_page, "@diff a.py#h1 id=a\n@diff constructor#h1 id=b", "a")
     again(repo, story_page, page, {"a.py": LINES.replace("value_9 = 9", "value_9 = 91")})
     assert state(page, "a") == changed("value_9 = 91")
     assert state(page, "b") == new()
@@ -360,10 +380,20 @@ def test_legacy_marks_carry_over(repo, story_page, before, after, story, was):
     assert page.evaluate(f"JSON.parse(localStorage.getItem({LEGACY}))") == ["gone.py:12345678"]
 
 
+def test_a_legacy_mark_that_twins_share_marks_neither(repo, story_page):
+    twins(repo)
+    page = opened(repo, story_page, "@diff job.py#h1 id=daily\n@diff job.py#h2 id=hourly")
+    page.evaluate(f"localStorage.setItem({LEGACY}, JSON.stringify([`${{daily.dataset.path}}:${{daily.dataset.hash.slice(0, 8)}}`]))")
+    story_page(repo, page)
+    assert state(page, "daily") == state(page, "hourly") == new()
+    assert page.evaluate(f"localStorage.getItem({LEGACY})") is None
+
+
 def test_a_load_writes_only_when_something_changed(repo, story_page, writes):
     two_hunks(repo)
     page = opened(repo, story_page, TWO)
     assert writes(page) == 0
+    assert page.locator(".progress .p-txt").inner_text() == "0/2 reviewed"
     mark(page, "one")
     story_page(repo, page)
     assert writes(page) == 0

@@ -1,18 +1,27 @@
 """A click on a name opens a panel; only the panel's chip, alt-click or the Trace menu start a trace (D45)."""
 import pytest
 
+from conftest import Repo
+
 LIB = "MAX_ROWS = 10\n\n\ndef load_rows(n):\n    return n\n"
 APP = "from src.lib import load_rows\n\nrows = load_rows(MAX_ROWS)\nlimit = max_rows_seen + 1\n"
 
 
-@pytest.fixture
-def page(repo, story_page):
+@pytest.fixture(scope="module")
+def built(tmp_path_factory, git_template):
+    """The one story every test here opens: none of them changes it."""
+    repo = Repo(tmp_path_factory.mktemp("click"), git_template)
     repo.commit({"README.md": "start\n"})
     repo.commit({"src/lib.py": LIB, "app.py": APP})
     repo.index()
     repo.story("@also src/lib.py\n\n@diff app.py#h1 id=use", front="traces:\n  rows: [load_rows, max_rows_seen]")
     repo.build()
-    return story_page(repo)
+    return repo
+
+
+@pytest.fixture
+def page(built, story_page):
+    return story_page(built)
 
 
 def tracing(page):

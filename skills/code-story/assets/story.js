@@ -669,7 +669,7 @@
     defTr.hidden = !defTrace;
     if (!defTrace) return;
     const { g } = defTrace;
-    const n = traceCount[g] || 0;
+    const n = lights(g); // not the count at load: unfolding a snippet can add one
     const on = traceOn === g;
     const name = traceNames[g] || g;
     $("span", defTr).textContent = on ? `Stop tracing ${name}` : `Trace ${name} · ${n} ${n === 1 ? "snippet" : "snippets"}`;
@@ -1203,14 +1203,13 @@
   for (const s of snips) [s.k, s.n] = [placesOf(s).indexOf(s.at) + 1, placesOf(s).length];
   // { path: [[day, hash, k, n, "row hashes"], …] }: the k-th of n twins
   const readMarks = () => {
+    const out = Object.create(null); // no prototype: a file can be named constructor
     try {
       const m = JSON.parse(localStorage.getItem(MARKS) || "{}");
       const ok = (x) => typeof x?.[0] === "number" && typeof x[1] === "string" && typeof x[4] === "string";
-      for (const p in m) if (!(m[p] = Array.isArray(m[p]) ? m[p].filter(ok) : []).length) delete m[p];
-      return m?.constructor === Object ? m : {};
-    } catch {
-      return {};
-    }
+      for (const [p, l] of Object.entries(Array.isArray(m) ? {} : m || {})) if (Array.isArray(l) && l.some(ok)) out[p] = l.filter(ok);
+    } catch {}
+    return out;
   };
   let marks = TOUR ? {} : readMarks();
   const dayOf = (v) => Math.max(0, ...[...v.matchAll(/\[(\d+),"/g)].map((d) => +d[1])); // a store's last use, unparsed
@@ -1235,16 +1234,22 @@
   }
   // the rows a and b have in common, in order, as [i, j] pairs
   function lcs(a, b) {
-    const [n, m] = [a.length, b.length];
-    if (n * m > 1e6) return [];
-    const t = new Uint16Array((n + 1) * (m + 1));
-    const at = (i, j) => i * (m + 1) + j;
-    for (let i = n - 1; i >= 0; i--)
-      for (let j = m - 1; j >= 0; j--) t[at(i, j)] = a[i] === b[j] ? t[at(i + 1, j + 1)] + 1 : Math.max(t[at(i + 1, j)], t[at(i, j + 1)]);
-    const out = [];
-    for (let i = 0, j = 0; i < n && j < m; )
-      if (a[i] === b[j]) out.push([i++, j++]);
-      else t[at(i + 1, j)] >= t[at(i, j + 1)] ? i++ : j++;
+    // the rows they start and end with first: only what lies between is compared, and only up to a million cells
+    let [s, n, m] = [0, a.length, b.length];
+    while (s < n && s < m && a[s] === b[s]) s++;
+    while (n > s && m > s && a[n - 1] === b[m - 1]) n--, m--;
+    const out = Array.from({ length: s }, (_, i) => [i, i]);
+    const [h, w] = [n - s, m - s];
+    if (h * w <= 1e6) {
+      const t = new Uint16Array((h + 1) * (w + 1));
+      const at = (i, j) => i * (w + 1) + j;
+      for (let i = h - 1; i >= 0; i--)
+        for (let j = w - 1; j >= 0; j--) t[at(i, j)] = a[s + i] === b[s + j] ? t[at(i + 1, j + 1)] + 1 : Math.max(t[at(i + 1, j)], t[at(i, j + 1)]);
+      for (let i = 0, j = 0; i < h && j < w; )
+        if (a[s + i] === b[s + j]) out.push([s + i++, s + j++]);
+        else t[at(i + 1, j)] >= t[at(i, j + 1)] ? i++ : j++;
+    }
+    for (let i = n; i < a.length; i++) out.push([i, i - n + m]);
     return out;
   }
   // every snippet's state (st), its bars, and the changed marks offered to it (lost); a mark in use gets `used`
@@ -1325,21 +1330,26 @@
     // so a load writes at most once a day, and only when something changed
     const old = new Set([].concat(store.get("reviewed", [])));
     const was = (s) => `${s.p}:${s.f.dataset.was || s.h.slice(0, 8)}`;
-    const moved = snips.filter((s) => old.has(was(s)));
+    // a key that twins share never said which of them was reviewed: it goes, and marks neither
+    const hit = snips.filter((s) => old.has(was(s)));
+    const moved = hit.filter((s) => s.n === 1);
     judge();
     if (moved.length || Object.values(marks).some((l) => l.some((x) => x.used && x[0] < today)))
       editMarks((m) => {
         for (const s of moved) storeMark(m, s.f, true);
         for (const l of Object.values(m)) for (const x of l) if (x.used) x[0] = today;
       }, false);
-    if (moved.length) moved.forEach((s) => old.delete(was(s))), old.size ? store.set("reviewed", [...old]) : store.drop("reviewed");
+    if (hit.length) hit.forEach((s) => old.delete(was(s))), old.size ? store.set("reviewed", [...old]) : store.drop("reviewed");
   }
   addEventListener("storage", (e) => !TOUR && e.key === MARKS && ((marks = readMarks()), repaint(null)));
-  // the next snippet below the middle of the screen that is left to revisit, from the top after the last
+  // the next snippet below the middle of the screen that is left to revisit, from the top after the last; where
+  // the page could not scroll the one it last went to up to the middle, the one after that
+  let revisited = null;
   function nextChanged() {
     const list = diffFrames.filter(isChanged);
-    const f = list.find((x) => x.getBoundingClientRect().top > innerHeight / 2 + 1) || list[0];
-    if (f) goTo(f, { block: "center" }), toast(`${LABEL}: snippet ${list.indexOf(f) + 1} of ${list.length}`);
+    const below = (x) => x.getBoundingClientRect().top > innerHeight / 2 + 1;
+    const f = (list.includes(revisited) && below(revisited) ? list[list.indexOf(revisited) + 1] : list.find(below)) || list[0];
+    if (f) goTo((revisited = f), { block: "center" }), toast(`${LABEL}: snippet ${list.indexOf(f) + 1} of ${list.length}`);
   }
 
   // ---------- frames fold to their header ----------
@@ -1434,6 +1444,7 @@
   const traceable = (x) => main.contains(x) && !x.closest(".nis-group");
   const traceSpans = (g) => $$(`.tr[data-tr="${g}"]`, main).filter(traceable);
   const holder = (x) => x.closest("figure.frame, .file-item");
+  const lights = (g) => new Set(traceSpans(g).map(holder).filter(Boolean)).size; // the snippets a trace lights now
 
   function setTrace(g, origin) {
     traceOn = g;
@@ -1507,7 +1518,7 @@
   }
   {
     for (const [g, name] of Object.entries(traceNames)) {
-      const n = (traceCount[g] = new Set(traceSpans(g).map(holder).filter(Boolean)).size);
+      const n = (traceCount[g] = lights(g));
       if (!n) continue;
       const b = document.createElement("button");
       b.type = "button";

@@ -1464,7 +1464,7 @@ class Defs:
         self.names: dict[tuple[str, str], list[Def]] = {}
         self.sites: set[tuple[str, int, int]] = set()
         self.sigs: dict[str, list[tuple[int, int, str, str]]] = {}
-        self.imports: dict[str, tuple[dict[str, tuple[str, str]], dict[int, str], set[int], set[str]]] = {}
+        self.imports: dict[str, tuple[dict[str, tuple[str, str]], dict[int, str], set[int], dict[str, list[str]]]] = {}
         self.file_links = cache(self._file_links)
         self.test = cache(lambda path: any(glob_match(path, p) for p in DEFAULT_EXCLUDES["tests"]))
         for path in shown:
@@ -1596,7 +1596,7 @@ class Defs:
         # each line's indentation, first word and where it starts in sig; a line a string starts or runs
         # through is as deep as can be, so a docstring's text at the margin never ends the function around it
         lead: dict[int, tuple[int, str, int]] = {}
-        for k, t in enumerate(sig):
+        for k, t in enumerate(sig if family == "py" else ()):
             lead.setdefault(t[0], (10**6 if t[2].startswith("s") else t[1], t[3], k))
 
         def in_function(i: int, top: int) -> bool:
@@ -1937,10 +1937,10 @@ class Renderer:
         toks = self.ix.src.lines(sha, path)[n - 1]
         return self.code(toks if "".join(t for _, t in toks) == text else [("", text)], text, links=self.def_links(sha, path, n))
 
-    def row_html(self, path: str, r: Row, h: Hunk | None = None, i: int = 0) -> str:
-        """h: the row is h.rows[i] and sits in a story frame, so it carries where it is in its file's diff, which
-        tells twins apart for reviewed marks (D44)."""
-        key = "" if h is None else f' data-i="{self.row_index(h) + i}"'
+    def row_html(self, path: str, r: Row, i: int | None = None) -> str:
+        """i: the row sits in a story frame, so it carries where it is in its file's diff, which tells twins apart
+        for reviewed marks (D44)."""
+        key = "" if i is None else f' data-i="{i}"'
         return (
             f'<div class="row {KIND[r.kind]}" data-o="{r.old or ""}" data-n="{r.new or ""}"{key}>'
             f'<span class="ln">{r.old or ""}</span><span class="ln">{r.new or ""}</span>'
@@ -2183,7 +2183,7 @@ class Renderer:
             else:
                 first_at = at
             last = h
-            parts.extend(self.row_html(h.path, r, h, at - seq.start(h) + i) for i, r in enumerate(rows))
+            parts.extend(self.row_html(h.path, r, i) for i, r in enumerate(rows, self.row_index(h) + at - seq.start(h)))
             adds += sum(r.kind == "+" for r in rows)
             dels += sum(r.kind == "-" for r in rows)
             news += [r.new for r in rows if r.new]
