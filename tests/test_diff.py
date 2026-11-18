@@ -88,13 +88,13 @@ def test_no_newline_marker_survives_show_text_and_html(repo):
 
 @pytest.mark.parametrize("path", ['space name.py', 'quote"name.py', 'café.py', 'hash#name.py'])
 def test_odd_paths_round_trip_through_diff_directives_and_html(repo, path):
-    repo.commit({path: "value = 1\n"})
-    head = repo.commit({path: "value = 2\n"})
+    repo.commit({path: "value = 1\nkept = 0\n"})
+    head = repo.commit({path: "value = 2\nkept = 0\n"})
     repo.git("remote", "add", "origin", "https://github.com/example/story.git")
     repo.git("update-ref", "refs/remotes/origin/main", head)
     repo.index()
     assert repo.json("index.json")["files"][0]["path"] == path
-    repo.story(f"@diff {shlex.quote(path + '#h1')} id=odd\n@ctx {shlex.quote(path + '@head')} 1")
+    repo.story(f"@diff {shlex.quote(path + '#h1')} id=odd\n@ctx {shlex.quote(path + '@head')} 2")
     repo.build()
     assert repo.frame("odd")["data-path"] == path
     assert json.loads(repo.frame("odd")["data-hunks"]) == [path + "#h1"]

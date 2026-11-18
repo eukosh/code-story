@@ -246,5 +246,9 @@ The engine pins every git setting that changes diff output (blank context lines,
 - Checked on copies of the five real Python stories (b2b-mcp PRs 23 and 29, exporter-kununu-users 15, exporter-sfdc-from-braze 71, exporter-sfdc 30), rebuilt against `main`: 172 new links in the rows the stories show at load, 45 of them on PR 29, and 420 in all the rows a reader can unfold or open in the full diff, 183 on PR 29. A link counts once per name on a row. The 172 were read against their targets and none was wrong. The receiver rule above came from a fixture, not from these stories, and changes none of their links. The negative cases in `tests/test_defs.py` are the ones the rules were written against.
 - Wording: the reader never sees "frame". Everything on the page says "snippet": "10/19 reviewed", "5 snippets", "Next snippet", titles, labels, toasts and help. Code, CSS classes, story.md directives, the authoring references and this document keep "frame" as the domain term.
 
+### D46 — A context frame holds only unchanged lines (2026-11-18)
+- A frame marked Unchanged once showed lines the change touched: nothing checked an `@ctx` range against the diff. The build now refuses a range that takes in a changed line on its side, or a line only the other side has sitting between two of its lines, and names the hunks to show with `@diff`. A file git diffs as binary has no lines to tell apart, so `@ctx` on it is refused and `@also` covers it.
+- Still open: a context frame unfolds the plain file (D40), so a reader who unfolds past the range sees changed lines without their red and green.
+
 ## Open questions
 None. P4 went through review rounds with Fable 5.1 and Codex Sol. The engine (D24) lives in `skills/code-story/scripts/codestory.py` and `skills/code-story/assets/`; it reproduces P4 from a story.md.

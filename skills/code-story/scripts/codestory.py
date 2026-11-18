@@ -907,8 +907,9 @@ def parse_lines_spec(args: list[str]) -> tuple[str, str, tuple[int, int] | None]
     elif len(args) > 1 and (r := re.fullmatch(r"(\d+)(?:-(\d+))?", args[1])):
         a, b = r[1], r[2]
     else:
-        return m[1], m[2], None
-    return m[1], m[2], (int(a), int(b or a))
+        a = None
+    path = posixpath.normpath(m[1])  # git reads ./a.py as a.py, and the diff only knows a.py
+    return path, m[2], (int(a), int(b or a)) if a else None
 
 
 def span(a: int, b: int) -> str:
@@ -927,6 +928,29 @@ def missing(ix: Indexed, sha: str, path: str, side: str) -> str:
 def rename_hint(files: list[FileDiff], path: str, side: str) -> str:
     f = next((f for f in files if f.path == path and f.old_path), None)
     return f"; at base it was {f.old_path}" if f and side == "base" else ""
+
+
+def changed_file(files: list[FileDiff], path: str, side: str) -> FileDiff | None:
+    return next((f for f in files if ((f.old_path or f.path) if side == "base" else f.path) == path), None)
+
+
+def hunks_inside(f: FileDiff, side: str, a: int, b: int) -> list[Hunk]:
+    """The hunks that change lines a-b of the file on this side, or add or remove lines between them."""
+    mine, theirs = ("new", "-") if side == "head" else ("old", "+")
+    hit = []
+    for h in f.hunks:
+        prev = None  # the last line of this side seen so far in the hunk
+        for r in h.rows:
+            n = getattr(r, mine)
+            if r.kind == theirs:  # a line only the other side has, sitting between prev and prev + 1 here
+                inside = prev is not None and a <= prev < b
+            else:
+                inside = r.kind != " " and a <= n <= b
+                prev = n
+            if inside:
+                hit.append(h)
+                break
+    return hit
 
 
 def show_hunk(h: Hunk) -> None:
@@ -2257,6 +2281,19 @@ class Renderer:
             return ""
         if not 1 <= a <= b <= len(lines):
             self.errors.append(f"story.md:{it.line}: {path}@{side} has {len(lines)} lines; {span(a, b)} is out of range")
+            return ""
+        f = changed_file(self.ix.files, path, side)
+        if f and f.binary:
+            self.errors.append(
+                f"story.md:{it.line}: @ctx shows unchanged code, but {path} changed and git diffs it as binary, "
+                f"so no line of it can be shown as unchanged; cover it with @also {f.path}"
+            )
+            return ""
+        if inside := hunks_inside(f, side, a, b) if f else []:
+            self.errors.append(
+                f"story.md:{it.line}: @ctx shows unchanged code, but {path}@{side} {span(a, b)} takes in "
+                f"{' '.join(h.id for h in inside)}; show the change with @diff and keep @ctx to the lines around it"
+            )
             return ""
         fid = self.new_id(it.kw.get("id"), it.line)
         rows = [

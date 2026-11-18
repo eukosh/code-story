@@ -56,6 +56,33 @@ def test_context_single_line_error_preserves_written_range(changed):
     assert "9000-9000" not in message
 
 
+@pytest.mark.parametrize(
+    "spec, error",
+    [
+        ("a.py@head 14", "takes in a.py#h2"),
+        ("./a.py@head 14", "takes in a.py#h2"),
+        ("a.py@base 5", "takes in a.py#h1"),
+        ("a.py@head 4-5", "takes in a.py#h1"),  # the removed line sat between head lines 4 and 5
+        ("a.py@head 1-19", "takes in a.py#h1 a.py#h2"),
+        ("old.py@base 15", "takes in new.py#h1"),
+        ("snap.json@head 1", "git diffs it as binary"),
+        ("a.py@head 1-4", None),
+        ("a.py@head 5-13", None),
+    ],
+)
+def test_context_rejects_ranges_that_take_in_the_change(repo, spec, error):
+    lines = [f"line_{n}" for n in range(1, 21)]
+    repo.commit({"a.py": "\n".join(lines) + "\n", "old.py": "\n".join(lines) + "\n", "snap.json": "1\n", ".gitattributes": "snap.json -diff\n"})
+    edited = "\n".join(l + "!" if l == "line_15" else l for l in lines if l != "line_5") + "\n"
+    repo.commit({"a.py": edited, "old.py": None, "new.py": "\n".join(l + "!" if l == "line_15" else l for l in lines) + "\n", "snap.json": "2\n"})
+    repo.index()
+    repo.story(f"@also a.py\n@also new.py\n@also snap.json\n@ctx {spec}")
+    if error:
+        assert error in repo.build(ok=False).stderr
+    else:
+        repo.build()
+
+
 def test_ripple_covers_sites_with_their_own_paths(repo):
     repo.commit({"a.py": "old\n", "b.py": "old\n"})
     repo.commit({"a.py": "new\n", "b.py": "new\n"})

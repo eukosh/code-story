@@ -66,7 +66,7 @@ A line of prose that starts with `@` reads as a directive; write `\@` to start i
 @ctx src/access.py@head 43
 ```
 
-Unchanged code at head or at the merge-base, marked Unchanged. Use it for context one hop out: callers, consumers, the fixture that shows a shape, the code a removed line used to call. Any file in the repo works, changed or not. A file shown at head also makes its definitions clickable wherever the page uses their names. Read the exact lines with `show path@head:a-b` first (`show` also takes `path@head a-b`, and `@ctx` takes `path@head:a-b`); line numbers from other tools are easy to get one off.
+Unchanged code at head or at the merge-base, marked Unchanged. The range can't take in changed lines; those go in a `@diff`. Use it for context one hop out: callers, consumers, the fixture that shows a shape, the code a removed line used to call. Any file in the repo works, changed or not. A file shown at head also makes its definitions clickable wherever the page uses their names. Read the exact lines with `show path@head:a-b` first (`show` also takes `path@head a-b`, and `@ctx` takes `path@head:a-b`); line numbers from other tools are easy to get one off.
 
 ### `@ripple`
 
@@ -181,6 +181,8 @@ When the build lists gaps, place each hunk in the chapter it belongs to, put fil
 | `id 'x' is already used by …` | Rename one of the two; the message says where the first one is. |
 | `card points at line(s) …` | Use new-side numbers the spine shows, or widen the spine. |
 | `'::: step' needs exactly one @diff, @ctx or @ripple` | One spine per step; move the rest into cards or the chapter. |
+| `@ctx shows unchanged code, but … takes in path#hN` | The range runs into the change. Show that part with `@diff` (`rows=` for a slice) and end or start the `@ctx` around it. |
+| `… git diffs it as binary` (from `@ctx`) | No line of a binary change can be shown as unchanged; cover the file with `@also`. |
 | `coverage: these changes aren't in the story` | See Coverage above. |
 | `the code under these anchors changed` | Re-read with `show`, update the named chapters, build with `--accept`. It applies only to a build that succeeds. |
 | `the working tree changed since index` | Run `index` again. |

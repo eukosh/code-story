@@ -25,7 +25,7 @@ def test_changed_hunk_names_every_chapter_and_accept_is_explicit(changed):
 
 def test_base_movement_invalidates_context_even_with_same_head(repo):
     base = repo.commit({"app.py": "original\n", "context.py": "before\n"})
-    moved_base = repo.commit({"context.py": "after\n"})
+    moved_base = repo.commit({"context.py": "inserted\nbefore\n"})
     head = repo.commit({"app.py": "changed\n"})
     repo.index(base=base)
     repo.story("@also app.py\n@also context.py\n@ctx context.py@base 1")
